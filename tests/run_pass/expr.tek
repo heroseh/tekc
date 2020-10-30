@@ -1,0 +1,73 @@
+
+expr_binary: proc() {
+	num: var
+
+	num = 5 + 20
+	assert(num == 25)
+
+	num = 20 - 5
+	assert(num == 15)
+
+	num = 20 * 5
+	assert(num == 100)
+
+	num = 20 / 5
+	assert(num == 4)
+
+	num = 20 % 5
+	assert(num == 0)
+
+	num = 20 * 5 + 5
+	assert(num == 105)
+
+	num = 20 / 4 * 5
+	assert(num == 25)
+}
+
+expr_unary: proc() {
+	num: var mut S16 = 30
+	ptr: var = num.& // address of
+
+	assert(ptr.* == 30) // dereference load
+	ptr.* = 400 // dereference store
+	assert(ptr.* == 400)
+
+	num = ptr.*.- // chaining dereference load and negate
+	assert(ptr.* == -400)
+	assert((ptr.* == 34).!) // not unary operator
+
+	num = ptr.*.! // chaining the not operator
+	assert(ptr.* == 32367)
+}
+
+Vec2: struct {
+	x: F32
+	y: F32
+}
+
+expr_struct: proc() {
+	v: var mut Vec2
+	v.x = 4
+	v.y = 6
+	assert(v.x == 4)
+	assert(v.y == 6)
+
+	v = Vec2()
+	assert(v.x == 0)
+	assert(v.y == 0)
+
+	v = Vec2(8, 9)
+	assert(v.x == 8)
+	assert(v.y == 9)
+
+	v = Vec2(x = 8, y = 9)
+	assert(v.x == 8)
+	assert(v.y == 9)
+}
+
+main: proc() {
+	expr_binary()
+	expr_unary()
+}
+
+

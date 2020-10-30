@@ -1,0 +1,16 @@
+
+main: proc() {
+	v: var U32 = 4
+	vol_mut: var volatile mut U32 = 3
+	mut_vol: var mut volatile U32 = 46
+	noalias_vol: var *noalias volatile U32 = mut_vol.&
+	noalias_vol_mut: var *noalias volatile mut U32 = mut_vol.&
+	mut_noalias_vol_mut: var mut *noalias volatile mut U32 = mut_vol.&
+
+	mut_vol = 34
+	assert(mut_vol == 34)
+
+	mut_noalias_vol_mut = vol_mut.&
+	assert(mut_noalias_vol_mut.* == 3)
+}
+

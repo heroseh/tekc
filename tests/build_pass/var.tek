@@ -1,0 +1,40 @@
+
+single: var U32 = 4
+double_one, double_two: var U32, U32 = 98, 67
+
+globals: proc() {
+	assert(single == 4)
+	assert(double_one == 98)
+	assert(double_two == 67)
+}
+
+locals_implicit: proc() {
+	num: var = 4.4
+	assert(num == 4.4)
+
+	one, two: var = 1, 2
+	assert(one == 1)
+	assert(two == 2)
+
+	string: var = "test"
+	assert(string == "test")
+}
+
+locals_explicit: proc() {
+	num: var F32 = 4.4
+	assert(num == 4.4)
+
+	one, two: var U32, U64 = 1, 2
+	assert(one == 1)
+	assert(two == 2)
+
+	string: var []U8 = "test"
+	assert(string == "test")
+}
+
+main: proc() {
+	globals()
+	locals_implicit()
+	locals_explicit()
+}
+

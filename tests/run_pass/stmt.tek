@@ -1,0 +1,24 @@
+
+stmt_assign: proc() {
+	num: var
+
+	num += 20
+	assert(num == 20)
+
+	num -= 2
+	assert(num == 18)
+
+	num *= 200
+	assert(num == 3600)
+
+	num /= 100
+	assert(num == 36)
+
+	num %= 5
+	assert(num == 1)
+}
+
+main: proc() {
+	stmt_assign()
+}
+

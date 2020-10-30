@@ -1,0 +1,11 @@
+
+Vec2: struct {
+	x: F32
+	y: F32
+}
+
+main: proc() {
+	v: var mut = Vec2()
+	v: var = Vec2(3, 6)
+}
+
