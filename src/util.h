@@ -778,6 +778,8 @@ typedef char* TekStrEntry;
 static inline uint32_t TekStrEntry_len(TekStrEntry str_entry) { return *(uint32_t*)str_entry; }
 static inline char* TekStrEntry_value(TekStrEntry str_entry) { return tek_ptr_add(str_entry, sizeof(uint32_t)); }
 
+TekHash tek_hash_fnv(char* bytes, uint32_t byte_count, TekHash hash);
+
 typedef_TekKVStk(TekHash, TekStrEntry);
 typedef TekKVStk(TekHash, TekStrEntry) TekStrTab;
 
@@ -804,19 +806,146 @@ static inline TekStrEntry TekStrTab_get_entry(TekStrTab* strtab, TekStrId str_id
 //
 //===========================================================================================
 
-//
-// @param size_in_out: points to the desired size but is rounded up to the nearest page size.
-//                     if *size_in_out is 0, then it is set to a page size.
-// @return: a pointer to the first page allocated from the OS.
-//
-void* tek_virt_mem_alloc(uintptr_t* size_in_out);
+
+typedef uint8_t TekVirtMemProtection;
+enum {
+	TekVirtMemProtection_no_access,
+	TekVirtMemProtection_read,
+	TekVirtMemProtection_read_write,
+	TekVirtMemProtection_exec_read,
+	TekVirtMemProtection_exec_read_write,
+};
 
 //
-// deallocates the pages allocated from tek_virt_mem_alloc.
+// 0 means success
+typedef uint32_t TekVirtMemError;
+
 //
-// @param(ptr) and @param(size) must be the same as the ones that came from the allocation.
+// @return: the previous error of a virtual memory function call.
+//          only call this directly after one of the virtual memory functions.
+//          on Unix: this returns errno
+//          on Windows: this returns GetLastError()
 //
-void tek_virt_mem_dealloc(void* ptr, uintptr_t size);
+TekVirtMemError tek_virt_mem_get_last_error();
+
+typedef uint8_t TekVirtMemErrorStrRes;
+enum {
+	TekVirtMemErrorStrRes_success,
+	TekVirtMemErrorStrRes_invalid_error_arg,
+	TekVirtMemErrorStrRes_not_enough_space_in_buffer,
+};
+
+//
+// get the string of @param(error) and writes it into the @param(buf_out) pointer upto @param(buf_out_len)
+// @param(buf_out) is null terminated on success.
+//
+// @return: the result detailing the success or error.
+//
+TekVirtMemErrorStrRes tek_virt_mem_get_error_string(TekVirtMemError error, char* buf_out, uint32_t buf_out_len);
+
+//
+// @return: the page size of the OS.
+// 			used to align the parameters of the virtual memory functions to a page.
+//          On Windows this actually returns the page granularity and not the page size.
+//          since Virtual{Alloc, Protect, Free}.lpAddress must be aligned to the page granularity (region of pages)
+//
+uintptr_t tek_virt_mem_page_size();
+
+//
+// reserve a range of memory in the virtual address space
+// reading or writing to this memory for the first time will be commited on a page by page basis.
+// once commit, the memory will be zero.
+//
+// @param requested_addr: the requested address you wish to reserve.
+//             must be a aligned to whatever tek_virt_mem_page_size returns.
+//             this is not guaranteed and is only used as hint.
+//             NULL will not be used as a hint.
+//
+// @param size: the size in bytes you wish to reserve from the @param(requested_addr)
+//             must be a aligned to whatever tek_virt_mem_page_size returns.
+//
+// @param protection: what the memory is allowed to be used for
+//
+// @return: NULL on error, otherwise the start of the reserved block of memory.
+//          if errored you can get the error by calling tek_virt_mem_get_last_error()
+//          directly after this call
+//
+void* tek_virt_mem_reserve(void* requested_addr, uintptr_t size, TekVirtMemProtection protection);
+
+//
+// change the protection of a range of memory.
+// this memory must have been reserved with tek_virt_mem_reserve.
+//
+// @param addr: the start of the pages you wish to change the protection for.
+//             must be a aligned to whatever tek_virt_mem_page_size returns.
+//
+// @param size: the size in bytes of the memory you wish to change protection for.
+//             must be a aligned to whatever tek_virt_mem_page_size returns.
+//
+// @param protection: what the memory is allowed to be used for
+//
+TekBool tek_virt_mem_protection_set(void* addr, uintptr_t size, TekVirtMemProtection protection);
+
+//
+// gives the memory back to the OS but will keep the address space reserved
+//
+// @param addr: the start of the pages you wish to decommit.
+//             must be a aligned to whatever tek_virt_mem_page_size returns.
+//
+// @param size: the size in bytes of the memory you wish to release.
+//             must be a aligned to whatever tek_virt_mem_page_size returns.
+//
+TekBool tek_virt_mem_decommit(void* addr, uintptr_t size);
+
+//
+// gives the pages reserved back to the OS. the address range must have be reserved with tek_virt_mem_reserve.
+// you can target sub pages of the original allocation but just make sure the parameters are aligned.
+//
+// @param addr: the start of the pages you wish to release.
+//             must be a aligned to whatever tek_virt_mem_page_size returns.
+//
+// @param size: the size in bytes of the memory you wish to release.
+//             must be a aligned to whatever tek_virt_mem_page_size returns.
+//
+TekBool tek_virt_mem_release(void* addr, uintptr_t size);
+
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+typedef int TekVirtMemFileHandle;
+#else
+#error "TODO implement virtual memory for this platform"
+#endif
+
+//
+// maps a file at the path @param(path) into memory.
+// you must use tek_virt_mem_release before calling
+// tek_virt_mem_map_file_close when you are finished with the memory mapped file.
+//
+//
+// @param path: the start of the pages you wish to release.
+//             must be a aligned to whatever tek_virt_mem_page_size returns.
+//
+// @param protection: what the memory is allowed to be used for
+//
+// @param size_out: apon success, this parameter will be set to the size of the the file
+//
+// @param file_handle_out: apon success, this parameter will be set to the file handle
+//                         that you can use to close the file with.
+//
+// @return: NULL on failure, otherwise the address pointing to the start of the memory mapped file is returned.
+//          if errored you can get the error by calling tek_virt_mem_get_last_error() directly after this call.
+//
+void* tek_virt_mem_map_file(char* path, TekVirtMemProtection protection, uintptr_t* size_out, TekVirtMemFileHandle* file_handle_out);
+
+//
+// closes the file that was mapped with tek_virt_mem_map_file
+//
+// @param file_handle: the handle of the file to close.
+//
+//
+// @return: tek_false on failure, otherwise tek_true is returned.
+//          if errored you can get the error by calling tek_virt_mem_get_last_error() directly after this call.
+//
+TekBool tek_virt_mem_map_file_close(TekVirtMemFileHandle file_handle);
 
 //===========================================================================================
 //
@@ -826,39 +955,22 @@ void tek_virt_mem_dealloc(void* ptr, uintptr_t size);
 //
 //===========================================================================================
 
-typedef struct TekArenaAlctor TekArenaAlctor;
-typedef struct TekArenaMetadata TekArenaMetadata;
-typedef struct TekArenaMetadataTable TekArenaMetadataTable;
+typedef struct TekLinearAlctor TekLinearAlctor;
 
-struct TekArenaMetadata {
-	void* arena;
-	uintptr_t size;
+struct TekLinearAlctor {
+	void* data;
+	void* pos;
 };
 
-struct TekArenaMetadataTable {
-	TekArenaMetadataTable* head_table; // the first metadata table.
-	TekArenaMetadataTable* next_table;
-	uint32_t entries_count;
-	uint32_t entries_cap;
-	TekArenaMetadata entries[];
-};
-
-//
-// the current arena is at alctor.metadata_table->entries[alctor.metadata_table->entries_count - 1]
-struct TekArenaAlctor {
-	TekArenaMetadataTable* metadata_table;
-	uintptr_t pos; // position in the current arena.
-};
-
-void TekArenaAlctor_init(TekArenaAlctor* alctor);
-void TekArenaAlctor_deinit(TekArenaAlctor* alctor);
-void TekArenaAlctor_reset(TekArenaAlctor* alctor);
+TekVirtMemError TekLinearAlctor_init(TekLinearAlctor* alctor);
+void TekLinearAlctor_deinit(TekLinearAlctor* alctor);
+void TekLinearAlctor_reset(TekLinearAlctor* alctor);
 
 //
 // @return: a pointer to memory with size and align that is zeroed.
-void* TekArenaAlctor_alloc(TekArenaAlctor* alctor, uintptr_t size, uintptr_t align);
+void* TekLinearAlctor_alloc(TekLinearAlctor* alctor, uintptr_t size, uintptr_t align);
 
-void* TekArenaAlctor_TekAlctor_fn(void* alctor_data, void* ptr, uintptr_t old_size, uintptr_t size, uintptr_t align);
+void* TekLinearAlctor_TekAlctor_fn(void* alctor_data, void* ptr, uintptr_t old_size, uintptr_t size, uintptr_t align);
 
 //===========================================================================================
 //
@@ -925,6 +1037,15 @@ void TekSpinRWLock_lock_for_write(TekSpinRWLock* lock);
 
 // returns the write access back to the lock
 void TekSpinRWLock_unlock_for_write(TekSpinRWLock* lock);
+
+uint32_t tek_atomic_find_key_32(_Atomic uint32_t* keys, uint32_t key, uint32_t start_idx, uint32_t end_idx);
+uint32_t tek_atomic_find_key_64(_Atomic uint64_t* keys, uint64_t key, uint32_t start_idx, uint32_t end_idx);
+#define tek_atomic_find_str_id tek_atomic_find_key_32
+#if TEK_HASH_64
+#define tek_atomic_find_hash tek_atomic_find_key_64
+#else
+#define tek_atomic_find_hash tek_atomic_find_key_32
+#endif
 
 //===========================================================================================
 //

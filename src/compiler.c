@@ -1,22 +1,96 @@
 #include "internal.h"
 
-thread_local TekWorker* tek_thread_worker = NULL;
-
 TekJob* _TekCompiler_job_get(TekCompiler* c, TekJobId job_id) {
-	TekPoolId pool_id = (job_id & TekJobId_id_MASK) >> TekJobId_id_SHIFT;
-	TekJob* j = TekPool_id_to_ptr(&c->job_sys.pool, pool_id);
+	tek_assert(job_id, "cannot get a job with a NULL identifier");
+	TekJob* jobs = TekCompiler_jobs(c);
+	uint32_t job_idx = ((job_id & TekJobId_id_MASK) >> TekJobId_id_SHIFT) - 1;
+	TekJob* j = &jobs[job_idx];
 	tek_assert(
-		j->counter == ((job_id & TekJobId_counter_MASK) >> TekJobId_counter_SHIFT),
-		"attempting to get a job with an old identifier"
-	);
-
+		j->counter == (job_id & TekJobId_counter_MASK) >> TekJobId_counter_SHIFT,
+		"attempting to get a job with an identifier has been freed");
 	return j;
 }
 
-TekJob* _TekCompiler_job_next(TekCompiler* c, TekJobType type, TekJobId* job_id_out) {
+TekJobId _TekCompiler_job_list_take(TekCompiler* c, TekJobList* list) {
+	TekSpinMtx_lock(&list->mtx);
+
+	TekJobId head_id = list->head;
+	if (head_id) {
+		//
+		// take from the list head by setting the next job as the head job
+		TekJob* head = _TekCompiler_job_get(c, head_id);
+		list->head = head->next;
+	}
+
+	TekSpinMtx_unlock(&list->mtx);
+	return head_id;
+}
+
+void _TekCompiler_job_list_add(TekCompiler* c, TekJobList* list, TekJobId id) {
+	TekSpinMtx_lock(&list->mtx);
+
+	if (list->tail) {
+		TekJob* tail = _TekCompiler_job_get(c, list->tail);
+		tail->next = id;
+	} else {
+		list->head = id;
+	}
+	list->tail = id;
+
+	TekSpinMtx_unlock(&list->mtx);
+}
+
+TekJobId _TekCompiler_job_next(TekCompiler* c, TekJobType type) {
 	//
-	// no jobs, so return NULL.
-	if (c->job_sys.pool.count == 0) return NULL;
+	// spin around in here and wait the a job to become available
+	uint32_t stalled_count = atomic_fetch_add(&c->stalled_workers_count, 1) + 1;
+	uint32_t count = atomic_load(&c->job_sys.available_count);
+	while (1) {
+		if (count == 0) {
+			if (stalled_count == c->workers_count) {
+				//
+				// this is the last worker to stall.
+				// rerun the failed jobs if some have succeed since the last time all the workers stalled.
+				// otherwise stop the compiler
+				uint32_t failed_count = atomic_load(&c->job_sys.failed_count);
+				if (failed_count == 0 || failed_count == c->job_sys.failed_count_last_iteration) {
+					atomic_fetch_or(&c->flags, TekCompilerFlags_is_stopping);
+					return 0;
+				}
+
+				//
+				// some jobs succeed this time around.
+				// so copy the failed lists to the available lists.
+				tek_copy_elmts(c->job_sys.type_to_job_list_map, c->job_sys.type_to_job_list_map_failed, TekJobType_COUNT);
+
+				// then zero the failed lists
+				tek_zero_elmts(c->job_sys.type_to_job_list_map_failed, TekJobType_COUNT);
+
+				// finally increment the available_count
+				c->job_sys.failed_count_last_iteration = failed_count;
+				atomic_store(&c->job_sys.available_count, failed_count);
+				count = failed_count;
+				continue;
+			}
+
+			//
+			// if the compiler is stopping then return.
+			if (atomic_load(&c->flags) & TekCompilerFlags_is_stopping)
+				return 0;
+
+			tek_cpu_relax();
+			count = atomic_load(&c->job_sys.available_count);
+			continue;
+		}
+
+		//
+		// try to substract 1. if we are thread to do so.
+		// then break and collect the job.
+		if (atomic_compare_exchange_weak(&c->job_sys.available_count, &count, count - 1))
+			break;
+	}
+
+	atomic_fetch_sub(&c->stalled_workers_count, 1);
 
 	//
 	// check to see if there is any more jobs for this type.
@@ -29,26 +103,18 @@ TekJob* _TekCompiler_job_next(TekCompiler* c, TekJobType type, TekJobId* job_id_
 	// so just having the loop below maybe faster, as it could result in less
 	// failed jobs that need to be reiterated over again.
 	TekJobList* list = &c->job_sys.type_to_job_list_map[type];
-	if (list->head) {
-		*job_id_out = list->head;
-		TekJob* head = _TekCompiler_job_get(c, list->head);
-		list->head = head->next;
-		return head;
-	}
+	TekJobId id = _TekCompiler_job_list_take(c, list);
+	if (id) return id;
 
 	//
 	// now look over every job type list and find a job.
 	for (TekJobType type = 0; type < TekJobType_COUNT; type += 1) {
 		list = &c->job_sys.type_to_job_list_map[type];
-		if (list->head) {
-			*job_id_out = list->head;
-			TekJob* head = _TekCompiler_job_get(c, list->head);
-			list->head = head->next;
-			return head;
-		}
+		TekJobId id = _TekCompiler_job_list_take(c, list);
+		if (id) return id;
 	}
 
-	return NULL;
+	tek_abort("it should be impossible to not find a job in one of the lists");
 }
 
 void _TekCompiler_job_finish(TekCompiler* c, TekJobId job_id, TekBool success_true_fail_false) {
@@ -59,101 +125,66 @@ void _TekCompiler_job_finish(TekCompiler* c, TekJobId job_id, TekBool success_tr
 		//
 		// success, increment the counter so the next allocation has a different counter.
 		// then deallocate the job.
-		j->counter += 1;
 		if (j->counter == (TekJobId_counter_MASK >> TekJobId_counter_SHIFT)) {
 			j->counter = 0;
+		} else {
+			j->counter += 1;
 		}
-		TekPoolId pool_id = (job_id & TekJobId_id_MASK) >> TekJobId_id_SHIFT;
-		TekPool_dealloc(&c->job_sys.pool, pool_id);
+		_TekCompiler_job_list_add(c, &c->job_sys.free_list, job_id);
 	} else {
+		//
+		// if this is a critical fail, then stop the compilation.
 		switch (j->type) {
 			case TekJobType_file_lex:
 			case TekJobType_file_parse:
-				atomic_fetch_or(&c->flags, TekCompilerFlags_is_stopping);
+				TekCompiler_signal_stop(c);
 				return;
 		}
 
 		//
-		// failed, increment the fail count and add the job to the failed linked list
-		c->job_sys.failed_count += 1;
+		// failed, increment the fail count and add the job to the failed linked list for it's type
+		atomic_fetch_add(&c->job_sys.failed_count, 1);
 		TekJobList* list = &c->job_sys.type_to_job_list_map_failed[j->type];
-		if (list->tail) {
-			TekJob* tail = _TekCompiler_job_get(c, list->tail);
-			tail->next = job_id;
-		} else {
-			list->head = job_id;
-		}
-		list->tail = job_id;
+		_TekCompiler_job_list_add(c, list, job_id);
 	}
-}
-
-void _TekWorker_init(TekWorker* w) {
-	TekArenaAlctor_init(&w->arena_alctor);
-	TekAlctor old_alctor = tek_swap(tek_alctor, ((TekAlctor){ .fn = TekArenaAlctor_TekAlctor_fn, .data = &w->arena_alctor }));
-
-	//
-	// preallocate memory: lexer
-	//
-	w->lexer.token_locs = tek_alloc_array(TekTokenLoc, tek_lexer_init_cap_tokens);
-	w->lexer.tokens = tek_alloc_array(TekToken, tek_lexer_init_cap_tokens);
-	w->lexer.tokens_cap = tek_lexer_init_cap_tokens;
-	TekStk_init_with_cap(&w->lexer.token_values, tek_lexer_init_cap_token_values);
-	TekStk_init_with_cap(&w->lexer.string_buf, tek_lexer_init_cap_string_buf);
-	TekStk_init_with_cap(&w->lexer.str_entries, tek_lexer_init_cap_str_entries);
-	TekStk_init_with_cap(&w->lexer.line_code_start_indices, tek_lexer_init_cap_line_code_start_indices);
-
-	tek_swap(tek_alctor, old_alctor);
 }
 
 int _TekWorker_main(void* args) {
 	TekWorker* w = args;
 	TekCompiler* c = w->c;
-	atomic_fetch_add(&c->wait.workers_running_count, 1);
 
-	if (w->arena_alctor.metadata_table) {
-		TekArenaAlctor_deinit(&w->arena_alctor);
+	//
+	// wait for all the workers to enter this function.
+	// if this is the last worker to enter, then free all the workers from the spin lock.
+	uint32_t w_idx = atomic_fetch_add(&c->running_workers_count, 1);
+	if (w_idx + 1 == c->workers_count) {
+		atomic_fetch_and(&c->flags, ~TekCompilerFlags_starting_up);
+	} else {
+		while (atomic_load(&c->flags) & TekCompilerFlags_starting_up) {
+			tek_cpu_relax();
+		}
 	}
-
-	_TekWorker_init(w);
-
-	tek_thread_worker = w;
-
-	tek_alctor.fn = TekArenaAlctor_TekAlctor_fn;
-	tek_alctor.data = &w->arena_alctor;
 
 	//
 	// if this is the first worker, setup the first job by creating the first library and file.
-	if (w == &c->workers[0]) {
+	if (w == TekCompiler_workers(c)) {
 		TekCompiler_lib_create(c, c->compile_args->file_path);
 	}
 
 	TekJobType type = 0;
 	TekJobId job_id = 0;
-	TekBool stalled = tek_false;
 	while (!(atomic_load(&c->flags) & TekCompilerFlags_is_stopping)) {
-		TekJob* job = _TekCompiler_job_next(c, type, &job_id);
-		if (job == NULL) {
-			if (!stalled) {
-				uint32_t stalled_count = atomic_fetch_add(&c->stalled_workers_count, 1) + 1;
-				stalled = tek_true;
-				if (stalled_count == c->workers_count) {
-					TekCompiler_signal_stop(c);
-				}
-			}
-			// spin lock while we don't have any jobs.
-			tek_cpu_relax();
-			continue;
-		}
-		if (stalled) {
-			atomic_fetch_sub(&c->stalled_workers_count, 1);
-			stalled = tek_false;
-		}
+		job_id = _TekCompiler_job_next(c, type);
+		if (job_id == 0)
+			break;
+
+		TekJob* job = _TekCompiler_job_get(c, job_id);
 		type = job->type;
 
 		TekBool success = tek_false;
 		switch (type) {
 			case TekJobType_file_lex:
-				success = TekLexer_lex(&w->lexer, c, job->file);
+				success = TekLexer_lex(&w->lexer, c, job->file_id);
 				break;
 			case TekJobType_file_parse:
 			case TekJobType_file_validate:
@@ -164,19 +195,109 @@ int _TekWorker_main(void* args) {
 		_TekCompiler_job_finish(c, job_id, success);
 	}
 
-	tek_thread_worker = NULL;
+	if (atomic_fetch_sub(&c->running_workers_count, 1) == 1) {
+		//
+		// unlock the mutex for the TekCompiler_compile_wait function.
+		TekMtx_unlock(&c->wait_mtx);
+		atomic_fetch_and(&c->flags, ~TekCompilerFlags_is_running);
+	}
 
-	TekWorker_terminate(w, 0);
+	return 0;
+}
+
+TekVirtMemError tek_mem_segs_reserve(uint8_t memsegs_count, uintptr_t* memsegs_sizes, void** segments_out) {
+	uintptr_t page_size = tek_virt_mem_page_size();
+
+	uintptr_t total_size = 0;
+	for (uint32_t i = 0; i < memsegs_count; i += 1) {
+		uintptr_t size = memsegs_sizes[i];
+		tek_assert(
+			size > page_size && size % page_size == 0,
+			"segment index '%u' with size of '0x%x(%zu)' must be greater than and a multiple of the page size '%u'",
+			i, size, size, page_size);
+		total_size += size;
+	}
+
+	// add the size for all of the guard pages that sit directly after.
+	total_size += memsegs_count * page_size;
+
+	total_size = (uintptr_t)tek_ptr_round_up_align((void*)total_size, page_size);
+
+	//
+	// reserve memory for all the memory all at once
+	void* mem = tek_virt_mem_reserve(NULL, total_size, TekVirtMemProtection_read_write);
+	if (mem == NULL) {
+		return tek_virt_mem_get_last_error();
+	}
+
+	//
+	// store the segments pointers in segments_out and mark the guard page.
+	for (uintptr_t i = 0; i < memsegs_count; i += 1) {
+		segments_out[i] = mem;
+		mem = tek_ptr_add(mem, memsegs_sizes[i]);
+
+		// mark the guard page after the group as no access.
+		if (!tek_virt_mem_protection_set(mem, page_size, TekVirtMemProtection_no_access)) {
+			return tek_virt_mem_get_last_error();
+		}
+		mem = tek_ptr_add(mem, page_size);
+	}
+
+	return 0;
+}
+
+TekVirtMemError tek_mem_segs_reset(uint8_t memsegs_count, uintptr_t* memsegs_sizes, void** segments) {
+	//
+	// decommit all the segments so the memory can return to the OS and it'll all be zeroed apon next access.
+	for (uintptr_t i = 0; i < memsegs_count; i += 1) {
+		if (!tek_virt_mem_decommit(segments[i], memsegs_sizes[i])) {
+			return tek_virt_mem_get_last_error();
+		}
+	}
+
+	return 0;
+}
+
+TekVirtMemError tek_mem_segs_release(uint8_t memsegs_count, uintptr_t* memsegs_sizes, void** segments_in_out) {
+	uintptr_t page_size = tek_virt_mem_page_size();
+
+	//
+	// release all the segments
+	for (uintptr_t i = 0; i < memsegs_count; i += 1) {
+		if (!tek_virt_mem_release(segments_in_out[i], memsegs_sizes[i])) {
+			return tek_virt_mem_get_last_error();
+		}
+
+		//
+		// the guard_page sit right after the segment
+		void* guard_page = tek_ptr_add(segments_in_out[i], memsegs_sizes[i]);
+		if (!tek_virt_mem_release(guard_page, page_size)) {
+			return tek_virt_mem_get_last_error();
+		}
+
+		segments_in_out[i] = NULL;
+	}
+
+	return 0;
 }
 
 TekJob* TekCompiler_job_queue(TekCompiler* c, TekJobType type) {
 	//
 	// allocate a new job from the pool.
 	TekPoolId pool_id = 0;
-	TekJob* j = TekPool_alloc(&c->job_sys.pool, &pool_id);
+
+	TekJobId id = _TekCompiler_job_list_take(c, &c->job_sys.free_list);
+	if (id == 0) {
+		id = atomic_fetch_add(&c->jobs_count, 1) + 1;
+		tek_assert(id <= TekJobId_id_MASK, "the maximum number of jobs has been reached. MAX: %u", TekJobId_id_MASK);
+	}
+
+	uint32_t job_idx = ((id & TekJobId_id_MASK) >> TekJobId_id_SHIFT) - 1;
+	TekJob* jobs = TekCompiler_jobs(c);
+	TekJob* j = &jobs[job_idx];
 
 	// backup the counter, if this is the first time, this will be zero
-	// as the pool zeros all of its newly allocated memory.
+	// as the memory defaults to zero
 	uint8_t counter = j->counter;
 
 	// zero the job data and initialize it.
@@ -184,150 +305,284 @@ TekJob* TekCompiler_job_queue(TekCompiler* c, TekJobType type) {
 	j->type = type;
 	j->counter = counter;
 
-	//
-	// check to see if we have allocated more jobs than the identifier can hold
-	pool_id <<= TekJobId_id_SHIFT;
-	tek_assert(pool_id <= TekJobId_id_MASK, "the maximum number of jobs has been reached. MAX: %u", TekJobId_id_MASK >> TekJobId_id_SHIFT);
-
-	// now create the id from the pool id and the counter
-	TekJobId job_id = (pool_id & TekJobId_id_MASK) |
-		((counter << TekJobId_counter_SHIFT) & TekJobId_counter_MASK);
 
 	//
 	// store the job at the tail of the linked list for this type of job
 	TekJobList* list = &c->job_sys.type_to_job_list_map[j->type];
-	if (list->tail) {
-		TekJob* tail = _TekCompiler_job_get(c, list->tail);
-		tail->next = job_id;
-	} else {
-		list->head = job_id;
-	}
-	list->tail = job_id;
+	_TekCompiler_job_list_add(c, list, id);
+	atomic_fetch_add(&c->job_sys.available_count, 1);
 
 	//
 	// now return the pointer to the job, so the caller can set up the rest of data
 	return j;
 }
 
-void TekCompiler_init(TekCompiler* c, uint32_t workers_count) {
-	tek_zero_elmt(c);
-
-	c->workers = tek_alloc_array(TekWorker, workers_count);
-	tek_zero_elmts(c->workers, workers_count);
-	c->workers_count = workers_count;
-
-	c->job_sys.type_to_job_list_map = tek_alloc_array(TekJobList, TekJobType_COUNT);
-	tek_zero_elmts(c->job_sys.type_to_job_list_map, TekJobType_COUNT);
-
-	c->job_sys.type_to_job_list_map_failed = tek_alloc_array(TekJobList, TekJobType_COUNT);
-	tek_zero_elmts(c->job_sys.type_to_job_list_map_failed, TekJobType_COUNT);
+TekCompiler* TekCompiler_init() {
+	void* segments[TekMemSegCompiler_COUNT];
+	TekVirtMemError res = tek_mem_segs_reserve(TekMemSegCompiler_COUNT, TekMemSegCompiler_sizes, segments);
+	if (res) {
+		return NULL;
+	}
+	TekCompiler* c = segments[0];
+	tek_copy_elmts(c->segments, segments, TekMemSegCompiler_COUNT);
+	return c;
 }
 
 void TekCompiler_deinit(TekCompiler* c) {
-	tek_abort("unimplemented");
+	tek_mem_segs_release(TekMemSegCompiler_COUNT, TekMemSegCompiler_sizes, c->segments);
 }
 
 TekStrId TekCompiler_strtab_get_or_insert(TekCompiler* c, char* str, uint32_t str_len) {
-	TekSpinMtx_lock(&c->lock.strtab);
-	TekStrId str_id = TekStrTab_get_or_insert(&c->strtab, str, str_len);
-	TekSpinMtx_unlock(&c->lock.strtab);
-	return str_id;
+	TekHash hash = tek_hash_fnv(str, str_len, 0);
+
+	//
+	// try to find a string entry with the same hash & value and return that.
+	// or create a new string entry.
+	_Atomic TekHash* hashes = TekCompiler_strtab_hashes(c);
+	_Atomic TekStrEntry* entries = TekCompiler_strtab_entries(c);
+	char* strings = TekCompiler_strtab_strings(c);
+	uint32_t start_idx = 0;
+	uint32_t end_idx = atomic_load(&c->strtab_entries_count);
+	TekStrId str_id = 0;
+	while (1) {
+		uint32_t id = tek_atomic_find_hash(hashes, hash, start_idx, end_idx);
+		if (id == 0) {
+			// did not find the hash in the array
+			// now try to compare and exchange the hash at the end of the array.
+			// it will be zero if no other thread added since we looked for our key.
+			TekHash expected = 0;
+			if (atomic_compare_exchange_weak(&hashes[end_idx], &expected, hash)) {
+				str_id = end_idx + 1;
+				atomic_fetch_add(&c->strtab_entries_count, 1);
+
+				// add the enough room for the size of the string to sit infront of the string.
+				// and make sure the next string entry can be aligned correctly by rounding up.
+				uintptr_t rounded_len = (uintptr_t)tek_ptr_round_up_align((void*)((uintptr_t)str_len + sizeof(uint32_t)), alignof(uint32_t));
+				TekStrEntry entry = &strings[atomic_fetch_add(&c->strtab_strings_size, rounded_len)];
+				*(uint32_t*)entry = str_len;
+				tek_copy_bytes(tek_ptr_add(entry, sizeof(uint32_t)), str, str_len);
+
+				// now store the entry in the entries array.
+				atomic_store(&entries[str_id - 1], entry);
+				return str_id;
+			}
+		} else {
+			//
+			// found a string with the same hash.
+			// check to see if it is a match.
+
+			//
+			// fetch the entry from the entries array.
+			// the entry will be NULL if it is still being setup.
+			// so spin until it is ready.
+			TekStrEntry entry = NULL;
+			while (!entry) {
+				entry = atomic_load(&entries[id - 1]);
+				tek_cpu_relax();
+			}
+
+			uint32_t entry_str_len = TekStrEntry_len(entry);
+			char* entry_str = TekStrEntry_value(entry);
+			if (entry_str_len == str_len && memcmp(entry_str, str, str_len) == 0) {
+				// the strings matched so return the identifier
+				return id;
+			}
+		}
+
+		//
+		// failed to find a match or set a new string here, so start the loop again.
+		// starting from where we got to.
+		// and refresh the strtab_entries_count to check the new entries added.
+		start_idx = id == 0 ? end_idx : id;
+		end_idx = atomic_load(&c->strtab_entries_count);
+	}
 }
 
 TekStrEntry TekCompiler_strtab_get_entry(TekCompiler* c, TekStrId str_id) {
-	TekSpinMtx_lock(&c->lock.strtab);
-	TekStrEntry str_entry = TekStrTab_get_entry(&c->strtab, str_id);
-	TekSpinMtx_unlock(&c->lock.strtab);
-	return str_entry;
+	tek_assert(str_id, "cannot get a string entry with a null string identifiers");
+	_Atomic TekStrEntry* entries = TekCompiler_strtab_entries(c);
+	return atomic_load(&entries[str_id - 1]);
 }
 
-TekFile* TekCompiler_file_create(TekCompiler* c, char* file_path, TekStrId parent_file_path_str_id, TekBool is_lib_root) {
+TekFileId TekCompiler_file_create(TekCompiler* c, char* file_path, TekStrId parent_file_path_str_id, TekBool is_lib_root) {
 	//
 	// resolve any symlinks and create an absolute path
 	char path[PATH_MAX];
 	int res = tek_file_path_normalize_resolve(file_path, path);
 	if (res != 0) {
-		TekError error = {
-			.kind = TekErrorKind_invalid_file_path,
-			.args[0] = { .file_path = file_path },
-			.args[1] = { .errnum = res },
-		};
-		TekCompiler_error_add(c, &error);
+		TekError* e = TekCompiler_error_add(c, TekErrorKind_invalid_file_path);
+		e->args[0].file_path = file_path;
+		e->args[1].errnum = res;
 		TekCompiler_signal_stop(c);
-		return NULL;
+		return 0;
 	}
 
 	//
-	// deduplicate the file path
+	// deduplicate the file path by using the string table.
 	// strlen + 1 to add the null terminator.
 	TekStrId path_str_id = TekCompiler_strtab_get_or_insert(c, path, strlen(path) + 1);
 
-	TekFile* file = NULL;
-	TekSpinMtx_lock(&c->lock.files);
-	{
-		uint32_t id = TekKVStk_find_key_str_id(&c->files, 0, c->files.count, path_str_id);
+	//
+	// try to find a file with the same path and return that.
+	// or create a new file.
+	_Atomic TekStrId* file_paths = TekCompiler_file_paths(c);
+	TekFile* files = TekCompiler_files(c);
+	uint32_t start_idx = 0;
+	uint32_t end_idx = atomic_load(&c->files_count);
+	TekFileId file_id = 0;
+	while (1) {
+		uint32_t id = tek_atomic_find_str_id(file_paths, path_str_id, start_idx, end_idx);
+		if (id == 0) {
+			// did not find the path in the array
+			// now try to compare and exchange the path_str_id at the end of the array.
+			// it will be zero if no other thread added since we looked for our key.
+			TekStrId expected = 0;
+			if (atomic_compare_exchange_weak(&file_paths[end_idx], &expected, path_str_id)) {
+				file_id = end_idx + 1;
+				atomic_fetch_add(&c->files_count, 1);
+				break;
+			}
 
-		// return NULL if the file already exist
-		if (id) {
+			//
+			// failed to set our path here, so start the loop again from the end_idx this time.
+			// and refresh the files_count to check the new files added.
+			start_idx = end_idx;
+			end_idx = atomic_load(&c->files_count);
+		} else {
+			//
+			// found a file with this path so return.
 			if (is_lib_root) {
-				TekError error = {
-					.kind = TekErrorKind_lib_root_file_is_used_in_another_lib,
-					.args[0] = { .str_id = path_str_id },
-					.args[1] = { .str_id = parent_file_path_str_id },
-				};
-				TekCompiler_error_add(c, &error);
+				TekError* e = TekCompiler_error_add(c, TekErrorKind_lib_root_file_is_used_in_another_lib);
+				e->args[0].str_id = path_str_id;
+				e->args[1].str_id = parent_file_path_str_id;
 				TekCompiler_signal_stop(c);
 			}
-			TekSpinMtx_unlock(&c->lock.files);
-			return NULL;
+			return id;
 		}
-
-		file = tek_alloc_elmt(TekFile);
-		TekKVStk_push(&c->files, &path_str_id, &file);
 	}
-	TekSpinMtx_unlock(&c->lock.files);
 
+	//
+	// this is a new file so set it up and queue it for lexing
+	//
+	TekFile* file = &files[file_id - 1];
+	TekVirtMemError virt_mem_res = tek_mem_segs_reserve(TekMemSegFile_COUNT, TekMemSegFile_sizes, file->segments);
+	if (virt_mem_res) {
+		TekError* e = TekCompiler_error_add(c, TekErrorKind_virt_mem);
+		e->args[0].virt_mem_error = virt_mem_res;
+		return 0;
+	}
+
+	//
+	// memory map the file into the address space
+	file->code = tek_virt_mem_map_file(path, TekVirtMemProtection_read, &file->size, &file->handle);
+	if (file->code == NULL) {
+		TekError* e = TekCompiler_error_add(c, TekErrorKind_lexer_file_read_failed);
+		e->args[0].file_id = file_id;
+		e->args[1].virt_mem_error = tek_virt_mem_get_last_error();
+		return 0;
+	}
+
+	file->id = file_id;
 	file->path_str_id = path_str_id;
 
 	TekJob* job = TekCompiler_job_queue(c, TekJobType_file_lex);
-	job->file = file;
-	return file;
+	job->file_id = file_id;
+	return file_id;
 }
 
-void TekCompiler_lib_create(TekCompiler* c, char* root_src_file_path) {
-	//
-	// allocate a new library, this IS ZEROED from the TekWorker.arena_alctor.
-	TekLib* lib = tek_alloc_elmt(TekLib);
-
-	//
-	// and the library pointer to the stack in the compiler
-	TekSpinMtx_lock(&c->lock.libs);
-	*TekStk_push(&c->libs, NULL) = lib;
-	TekSpinMtx_unlock(&c->lock.libs);
-
-	//
-	// allocate a new file, this IS ZEROED from the TekWorker.arena_alctor.
-	TekFile* file = TekCompiler_file_create(c, root_src_file_path, 0, tek_true);
-	if (file == NULL) return;
-
-	*TekStk_push(&lib->files, NULL) = file;
+TekFile* TekCompiler_file_get(TekCompiler* c, TekFileId file_id) {
+	tek_assert(file_id, "cannot get a file with a NULL id");
+	TekFile* files = TekCompiler_files(c);
+	return &files[file_id - 1];
 }
 
-void TekCompiler_compile_start(TekCompiler* c, TekCompileArgs* args) {
-	// unlocked in TekWorker_terminate
-	TekMtx_lock(&c->wait.mtx);
+TekLibId TekCompiler_lib_create(TekCompiler* c, char* root_src_file_path) {
+	//
+	// allocate a new library
+	TekLib* libs = TekCompiler_libs(c);
+	uint32_t idx = atomic_fetch_add(&c->libs_count, 1);
+	TekLib* lib = &libs[idx];
+	lib->id = idx + 1;
 
-	atomic_store(&c->flags, 0);
+	//
+	// allocate the memory segments for the lib structure
+	TekVirtMemError res = tek_mem_segs_reserve(TekMemSegLib_COUNT, TekMemSegLib_sizes, lib->segments);
+	if (res) {
+		TekError* e = TekCompiler_error_add(c, TekErrorKind_virt_mem);
+		e->args[0].virt_mem_error = res;
+		return 0;
+	}
+
+	//
+	// create a file for the library's root source file
+	TekFileId file_id = TekCompiler_file_create(c, root_src_file_path, 0, tek_true);
+	if (file_id == 0) return 0;
+
+	//
+	// add the file to the lib's file array
+	TekFileId* files = TekLib_files(lib);
+	files[atomic_fetch_add(&lib->files_count, 1)] = file_id;
+	return lib->id;
+}
+
+TekLib* TekCompiler_lib_get(TekCompiler* c, TekLibId lib_id) {
+	tek_assert(lib_id, "cannot get a lib with a NULL id");
+	TekLib* libs = TekCompiler_libs(c);
+	return &libs[lib_id - 1];
+}
+
+TekCompilerError TekCompiler_compile_start(TekCompiler* c, uint16_t workers_count, TekCompileArgs* args) {
+	TekCompilerFlags prev_state_of_flags = atomic_fetch_or(&c->flags, TekCompilerFlags_is_running);
+	if (prev_state_of_flags & TekCompilerFlags_is_running) {
+		return TekCompilerError_already_running;
+	}
+
+	//
+	// release all of the memory segments of the libraries and files
+	//
+	{
+		TekLib* libs = TekCompiler_libs(c);
+		uint32_t libs_count = atomic_load(&c->libs_count);
+		for (uint32_t i = 0; i < libs_count; i += 1) {
+			if (libs->segments[0] == NULL) break;
+			tek_mem_segs_release(TekMemSegLib_COUNT, TekMemSegLib_sizes, libs->segments);
+		}
+
+		TekFile* files = TekCompiler_files(c);
+		uint32_t files_count = atomic_load(&c->files_count);
+		for (uint32_t i = 0; i < files_count; i += 1) {
+			if (files->segments[0] == NULL) break;
+			tek_mem_segs_release(TekMemSegFile_COUNT, TekMemSegFile_sizes, files->segments);
+		}
+	}
+
+	//
+	// copy out the segment pointers and then zero the compiler segments.
+	void* segments[TekMemSegCompiler_COUNT];
+	tek_copy_elmts(segments, c->segments, TekMemSegCompiler_COUNT);
+	tek_mem_segs_reset(TekMemSegCompiler_COUNT, TekMemSegCompiler_sizes, segments);
+
+	//
+	// copy the segment pointers back and initialize the data.
+	tek_copy_elmts(c->segments, segments, TekMemSegCompiler_COUNT);
+	atomic_store(&c->flags, TekCompilerFlags_is_running | TekCompilerFlags_starting_up);
 	c->compile_args = args;
+	c->workers_count = workers_count;
 
-	for (uint32_t i = 0; i < c->workers_count; i += 1) {
-		TekWorker* w = &c->workers[i];
+	// the last worker will unlock this mutex at the end of _TekWorker_main
+	TekMtx_lock(&c->wait_mtx);
+
+	TekWorker* workers = TekCompiler_workers(c);
+	for (uint32_t i = 0; i < workers_count; i += 1) {
+		TekWorker* w = &workers[i];
 		w->c = c;
 		if (thrd_create(&w->thread, _TekWorker_main, w) != thrd_success) {
 			atomic_fetch_or(&c->flags, TekCompilerFlags_is_stopping);
-			break;
+			return TekCompilerError_failed_to_start_worker_threads;
 		}
 	}
+
+	return TekCompilerError_none;
 }
 
 void TekCompiler_debug_lexer_tokens(TekCompiler* c) {
@@ -335,16 +590,20 @@ void TekCompiler_debug_lexer_tokens(TekCompiler* c) {
 
 	TekStk(char) output = {0};
 
-	for (uint32_t i = 0; i < c->files.count; i += 1) {
-		TekFile* file = *TekKVStk_get_value(&c->files, i);
+	TekFile* files = TekCompiler_files(c);
+	uint32_t files_count = atomic_load(&c->files_count);
+	for (uint32_t i = 0; i < files_count; i += 1) {
+		TekFile* file = &files[i];
+		TekValue* token_values = TekFile_token_values(file);
+		TekToken* tokens = TekFile_tokens(file);
 
-		char* path = TekStrEntry_value(TekStrTab_get_entry(&c->strtab, file->path_str_id));
+		char* path = TekStrEntry_value(TekCompiler_strtab_get_entry(c, file->path_str_id));
 		TekStk_push_str_fmt(&output, "########## FILE: %s ##########\n", path);
 
 		uint32_t value_idx = 0;
 		for (uint32_t j = 0; j < file->tokens_count; j += 1) {
-			TekValue* value = &file->token_values[value_idx];
-			TekToken token = file->tokens[j];
+			TekValue* value = &token_values[value_idx];
+			TekToken token = tokens[j];
 
 			char* token_name = NULL;
 			if (token < TekToken_ident) { // is ascii symbol
@@ -378,7 +637,7 @@ void TekCompiler_debug_lexer_tokens(TekCompiler* c) {
 				case TekToken_label:
 				case TekToken_lit_string: {
 					if (value->str_id) {
-						TekStrEntry entry = TekStrTab_get_entry(&c->strtab, value->str_id);
+						TekStrEntry entry = TekCompiler_strtab_get_entry(c, value->str_id);
 						uint32_t str_len = TekStrEntry_len(entry);
 						char* str = TekStrEntry_value(entry);
 						TekStk_push_str_fmt(&output, "%s -> \"", token_name);
@@ -406,14 +665,17 @@ void TekCompiler_debug_lexer_tokens(TekCompiler* c) {
 	TekStk_deinit(&output);
 }
 
-void TekCompiler_compile_wait(TekCompiler* c) {
-	TekMtx_lock(&c->wait.mtx);
-	TekMtx_unlock(&c->wait.mtx);
+TekCompilerError TekCompiler_compile_wait(TekCompiler* c) {
+	TekMtx_lock(&c->wait_mtx);
+	TekMtx_unlock(&c->wait_mtx);
 
-	if (!TekCompiler_has_errors(c)) {
+	if (TekCompiler_has_errors(c)) {
+		return TekCompilerError_compile_error;
+	} else {
 #if TEK_LEXER_DEBUG_TOKEN
 		TekCompiler_debug_lexer_tokens(c);
 #endif
+		return TekCompilerError_none;
 	}
 }
 
@@ -485,10 +747,11 @@ void TekCompiler_error_string_code_span(TekStk(char)* string_out, char* code, ui
 
 void TekCompiler_error_string_code(TekCompiler* c, TekStk(char)* string_out, TekFile* file, uint32_t line, uint32_t column, uint32_t code_idx_start, uint32_t code_idx_end, TekBool use_ascii_colors) {
 	char* code = file->code;
-	uint32_t code_idx_prev_line_start = file->line_code_start_indices[line == 1 ? 0 : line - 2];
-	uint32_t code_idx_line_start = file->line_code_start_indices[line - 1];
-	uint32_t code_idx_next_line_start = file->line_code_start_indices[line >= file->lines_count ? file->lines_count - 1 : line];
-	uint32_t code_idx_next_next_line_start = file->line_code_start_indices[line + 1 >= file->lines_count ? file->lines_count - 1 : line + 1];
+	uintptr_t* line_code_start_indices = TekFile_line_code_start_indices(file);
+	uint32_t code_idx_prev_line_start = line_code_start_indices[line == 1 ? 0 : line - 2];
+	uint32_t code_idx_line_start = line_code_start_indices[line - 1];
+	uint32_t code_idx_next_line_start = line_code_start_indices[line >= file->lines_count ? file->lines_count - 1 : line];
+	uint32_t code_idx_next_next_line_start = line_code_start_indices[line + 1 >= file->lines_count ? file->lines_count - 1 : line + 1];
 
 	char* path = TekStrEntry_value(TekCompiler_strtab_get_entry(c, file->path_str_id));
 	char* fmt = use_ascii_colors
@@ -569,9 +832,13 @@ void TekCompiler_error_string_file_path_errno(TekCompiler* c, TekStk(char)* stri
 	tek_abort("unimplemented");
 }
 
+void TekCompiler_error_string_virt_mem(TekCompiler* c, TekStk(char)* string_out, TekBool use_ascii_colors, TekError* e) {
+	tek_abort("unimplemented");
+}
+
 void TekCompiler_error_string_single(TekCompiler* c, TekStk(char)* string_out, TekBool use_ascii_colors, TekError* e) {
-	TekFile* file = e->args[0].file;
-	TekTokenLoc* loc = &file->token_locs[e->args[0].token_idx];
+	TekFile* file = TekCompiler_file_get(c, e->args[0].file_id);
+	TekTokenLoc* loc = &TekFile_token_locs(file)[e->args[0].token_idx];
 
 	TekCompiler_error_string_error_line(string_out, e->kind, use_ascii_colors);
 	TekCompiler_error_string_code(c, string_out, file, loc->line, loc->column, loc->code_idx_start, loc->code_idx_end, use_ascii_colors);
@@ -581,24 +848,29 @@ void TekCompiler_error_string_double(TekCompiler* c, TekStk(char)* string_out, T
 	TekCompiler_error_string_error_line(string_out, e->kind, use_ascii_colors);
 	char** info_lines = TekErrorKind_double_info_lines[e->kind];
 
-	TekFile* file = e->args[0].file;
-	TekTokenLoc* loc = &file->token_locs[e->args[0].token_idx];
+	TekFile* file = TekCompiler_file_get(c, e->args[0].file_id);
+	TekTokenLoc* loc = &TekFile_token_locs(file)[e->args[0].token_idx];
 	TekCompiler_error_string_info_line(string_out, info_lines[0], use_ascii_colors);
 	TekCompiler_error_string_code(c, string_out, file, loc->line, loc->column, loc->code_idx_start, loc->code_idx_end, use_ascii_colors);
 
-	file = e->args[1].file;
-	loc = &file->token_locs[e->args[1].token_idx];
+	file = TekCompiler_file_get(c, e->args[1].file_id);
+	loc = &TekFile_token_locs(file)[e->args[1].token_idx];
 	TekCompiler_error_string_info_line(string_out, info_lines[1], use_ascii_colors);
 	TekCompiler_error_string_code(c, string_out, file, loc->line, loc->column, loc->code_idx_start, loc->code_idx_end, use_ascii_colors);
 }
 
 void TekCompiler_errors_string(TekCompiler* c, TekStk(char)* string_out, TekBool use_ascii_colors) {
-	for (uint32_t i = 0; i < c->errors.count; i += 1) {
-		TekError* e = &c->errors.TekStk_data[i];
+	TekError* errors = TekCompiler_errors(c);
+	uint32_t errors_count = atomic_load(&c->errors_count);
+	for (uint32_t i = 0; i < errors_count; i += 1) {
+		TekError* e = &errors[i];
 		switch (e->kind) {
 			case TekErrorKind_invalid_file_path:
-			case TekErrorKind_lexer_file_read_failed:
 				TekCompiler_error_string_file_path_errno(c, string_out, use_ascii_colors, e);
+				break;
+			case TekErrorKind_virt_mem:
+			case TekErrorKind_lexer_file_read_failed:
+				TekCompiler_error_string_virt_mem(c, string_out, use_ascii_colors, e);
 				break;
 			case TekErrorKind_lib_root_file_is_used_in_another_lib:
 				break;
@@ -634,10 +906,12 @@ void TekCompiler_errors_string(TekCompiler* c, TekStk(char)* string_out, TekBool
 	}
 }
 
-void TekCompiler_error_add(TekCompiler* c, TekError* error) {
-	TekSpinMtx_lock(&c->lock.errors);
-	TekStk_push(&c->errors, error);
-	TekSpinMtx_unlock(&c->lock.errors);
+TekError* TekCompiler_error_add(TekCompiler* c, TekErrorKind kind) {
+	TekError* errors = TekCompiler_errors(c);
+	uint32_t idx = atomic_fetch_add(&c->errors_count, 1);
+	TekError* e = &errors[idx];
+	e->kind = kind;
+	return e;
 }
 
 void TekCompiler_signal_stop(TekCompiler* c) {
@@ -645,31 +919,14 @@ void TekCompiler_signal_stop(TekCompiler* c) {
 	atomic_fetch_or(&c->flags, TekCompilerFlags_is_stopping);
 }
 
+TekBool TekCompiler_out_of_memory(TekCompiler* c) {
+	return atomic_load(&c->flags) & TekCompilerFlags_out_of_memory;
+}
+
 TekBool TekCompiler_has_errors(TekCompiler* c) {
 	if (atomic_load(&c->flags) & TekCompilerFlags_out_of_memory)
 		return tek_true;
 
-	TekSpinMtx_lock(&c->lock.errors);
-	TekBool has_errors = c->errors.count;
-	TekSpinMtx_unlock(&c->lock.errors);
-	return has_errors;
-}
-
-noreturn void TekWorker_terminate(TekWorker* w, int exit_code) {
-	uint16_t prev_count = atomic_fetch_sub(&w->c->wait.workers_running_count, 1);
-	if (prev_count == 1) {
-		// this is the last worker to terminate. so unlock the mutex.
-		TekMtx_unlock(&w->c->wait.mtx);
-	}
-	// terminate the current thread.
-	thrd_exit(exit_code);
-}
-
-noreturn void TekWorker_terminate_out_of_memory(TekWorker* w) {
-	// set these flags so the other workers will stop working
-	// and the user can check for an out of memory error.
-	atomic_fetch_or(&w->c->flags, TekCompilerFlags_out_of_memory | TekCompilerFlags_is_stopping);
-
-	TekWorker_terminate(w, 1);
+	return atomic_load(&c->errors_count) > 0;
 }
 

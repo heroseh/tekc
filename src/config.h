@@ -1,7 +1,14 @@
+#ifndef TEK_CONFIG_H
+#define TEK_CONFIG_H
+
 #define TEK_DEBUG_ASSERTIONS 0
+#define TEK_HASH_64 0
 
 #define tek_thread_sync_primitive_spin_iterations 128
 
+#define TEK_LEXER_DEBUG_TOKEN 1
+#define tek_lexer_debug_token_path "/tmp/tek_tokens"
+#define tek_lexer_cap_open_brackets 128
 
 //===========================================================================================
 //
@@ -37,28 +44,4 @@
 #define tek_ansi_esc_color_fg_set(color) "\x1b["color"m"
 #define tek_ansi_esc_color_reset(color) "\x1b[0m"
 
-//===========================================================================================
-//
-//
-// Memory Allocation
-//
-//
-//===========================================================================================
-#define TekArenaAlctor_min_arena_size 32768
-
-//===========================================================================================
-//
-//
-// Lexer
-//
-//
-//===========================================================================================
-#define tek_lexer_debug_token_path "/tmp/tek_tokens"
-#define TEK_LEXER_DEBUG_TOKEN 1
-#define tek_lexer_init_cap_tokens 4096
-#define tek_lexer_init_cap_token_values 4096
-#define tek_lexer_init_cap_token_open_brackets 64
-#define tek_lexer_init_cap_string_buf 0x100000 // 1MB
-#define tek_lexer_init_cap_str_entries 4096
-#define tek_lexer_init_cap_line_code_start_indices 4096
-
+#endif

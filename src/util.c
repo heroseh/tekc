@@ -801,11 +801,11 @@ void _TekPool_expand(_TekPool* pool, uint32_t new_cap, uintptr_t elmt_size, uint
 	//
 	// expand the pool, this is fine since we store id's everywhere.
 	//
-	uint32_t bitset_byte_count = (pool->cap / 8) + 1;
+	uint32_t bitset_size = (pool->cap / 8) + 1;
 	uintptr_t cap_bytes = ((uintptr_t)pool->cap * elmt_size) + pool->elmts_start_byte_idx;
 
-	uint32_t new_bitset_byte_count = (new_cap / 8) + 1;
-	uint32_t new_elmts_start_byte_idx = (uintptr_t)tek_ptr_round_up_align((void*)(uintptr_t)new_bitset_byte_count, elmt_align);
+	uint32_t new_bitset_size = (new_cap / 8) + 1;
+	uint32_t new_elmts_start_byte_idx = (uintptr_t)tek_ptr_round_up_align((void*)(uintptr_t)new_bitset_size, elmt_align);
 	uintptr_t new_cap_bytes = ((uintptr_t)new_cap * elmt_size) +
 		new_elmts_start_byte_idx;
 
@@ -857,8 +857,8 @@ void _TekPool_reset_and_populate(_TekPool* pool, void* elmts, uint32_t count, ui
 }
 
 void _TekPool_init(_TekPool* pool, uint32_t cap, uintptr_t elmt_size, uintptr_t elmt_align) {
-	uintptr_t bitset_byte_count = (cap / 8) + 1;
-	uintptr_t elmts_start_byte_idx = (uintptr_t)tek_ptr_round_up_align((void*)bitset_byte_count, elmt_align);
+	uintptr_t bitset_size = (cap / 8) + 1;
+	uintptr_t elmts_start_byte_idx = (uintptr_t)tek_ptr_round_up_align((void*)bitset_size, elmt_align);
 	uintptr_t cap_bytes = ((uintptr_t)cap * elmt_size) + elmts_start_byte_idx;
 	pool->data = tek_alloc(cap_bytes, elmt_align);
 	memset(tek_ptr_add(pool->data, elmts_start_byte_idx), 0, (uintptr_t)cap * elmt_size);
@@ -870,8 +870,8 @@ void _TekPool_init(_TekPool* pool, uint32_t cap, uintptr_t elmt_size, uintptr_t 
 }
 
 void _TekPool_deinit(_TekPool* pool, uintptr_t elmt_size, uintptr_t elmt_align) {
-	uintptr_t bitset_byte_count = (pool->cap / 8) + 1;
-	uintptr_t elmts_start_byte_idx = (uintptr_t)tek_ptr_round_up_align((void*)bitset_byte_count, elmt_align);
+	uintptr_t bitset_size = (pool->cap / 8) + 1;
+	uintptr_t elmts_start_byte_idx = (uintptr_t)tek_ptr_round_up_align((void*)bitset_size, elmt_align);
 	uintptr_t cap = ((uintptr_t)pool->cap * elmt_size) + elmts_start_byte_idx;
 	tek_dealloc(pool->data, cap, elmt_align);
 	*pool = (_TekPool){0};
@@ -1113,7 +1113,7 @@ void _TekKVStk_remove_shift(_TekKVStk* kv_stk, uint32_t idx, uint32_t key_size, 
 //
 //===========================================================================================
 
-static TekHash _tek_hash_fnv(char* bytes, uint32_t byte_count, TekHash hash) {
+TekHash tek_hash_fnv(char* bytes, uint32_t byte_count, TekHash hash) {
 	char* bytes_end = bytes + byte_count;
 	while (bytes < bytes_end) {
 		hash = hash ^ *bytes;
@@ -1128,7 +1128,7 @@ static TekHash _tek_hash_fnv(char* bytes, uint32_t byte_count, TekHash hash) {
 }
 
 TekStrId TekStrTab_get_or_insert(TekStrTab* strtab, char* str, uint32_t str_len) {
-	TekHash hash = _tek_hash_fnv(str, str_len, 0);
+	TekHash hash = tek_hash_fnv(str, str_len, 0);
 	uint32_t str_idx = 0;
 	//
 	// loop and maybe find a matching hash
@@ -1170,31 +1170,189 @@ TekStrId TekStrTab_get_or_insert(TekStrTab* strtab, char* str, uint32_t str_len)
 //
 //===========================================================================================
 
-void* tek_virt_mem_alloc(uintptr_t* size_in_out) {
-	uintptr_t size = *size_in_out;
-	TekBool success = tek_false;
 #ifdef __linux__
-	uintptr_t page_size = getpagesize();
-	if (size == 0) size = page_size;
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <asm-generic/mman.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+#include <fcntl.h>
+#elif _WIN32
+// TODO: i have read that the windows headers can really slow down compile times.
+// since the win32 api is stable maybe we should forward declare the functions and constants manually ourselves
+#include <windows.h>
+#endif
 
-	// make the size a multiple of the page size
-	size = (uintptr_t)tek_ptr_round_up_align((void*)size, page_size);
-	void* ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-	success = ptr != MAP_FAILED;
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+static int _tek_virt_mem_prot_unix(TekVirtMemProtection prot) {
+	switch (prot) {
+		case TekVirtMemProtection_no_access: return 0;
+		case TekVirtMemProtection_read: return PROT_READ;
+		case TekVirtMemProtection_read_write: return PROT_READ | PROT_WRITE;
+		case TekVirtMemProtection_exec_read: return PROT_EXEC | PROT_READ;
+		case TekVirtMemProtection_exec_read_write: return PROT_READ | PROT_WRITE | PROT_EXEC;
+	}
+	return 0;
+}
+#elif _WIN32
+static DWORD _tek_virt_mem_prot_windows(TekVirtMemProtection prot) {
+	switch (prot) {
+		case TekVirtMemProtection_no_access: return PAGE_NOACCESS;
+		case TekVirtMemProtection_read: return PAGE_READONLY;
+		case TekVirtMemProtection_read_write: return PAGE_READWRITE;
+		case TekVirtMemProtection_exec_read: return PAGE_EXECUTE_READ;
+		case TekVirtMemProtection_exec_read_write: return PAGE_EXECUTE_READWRITE;
+	}
+	return 0;
+}
+#else
+#error "unimplemented virtual memory API for this platform"
+#endif
+
+TekVirtMemError tek_virt_mem_get_last_error() {
+#ifdef __linux__
+	return errno;
+#elif _WIN32
+    return GetLastError();
+#endif
+}
+
+TekVirtMemErrorStrRes tek_virt_mem_get_error_string(TekVirtMemError error, char* buf_out, uint32_t buf_out_len) {
+#if _WIN32
+	DWORD res = FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, error, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)buf_out, buf_out_len, NULL);
+	if (res == 0) {
+		tek_abort("TODO handle error code: %u", res);
+	}
+#elif _GNU_SOURCE
+	// GNU version (screw these guys for changing the way this works)
+	char* buf = strerror_r(error, buf_out, buf_out_len);
+	if (strcmp(buf, "Unknown error") == 0) {
+		return TekVirtMemErrorStrRes_invalid_error_arg;
+	}
+
+	// if its static string then copy it to the buffer
+	if (buf != buf_out) {
+		strncpy(buf_out, buf, buf_out_len);
+
+		uint32_t len = strlen(buf);
+		if (len < buf_out_len) {
+			return TekVirtMemErrorStrRes_not_enough_space_in_buffer;
+		}
+	}
+#elif defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+	// use the XSI standard behavior.
+	int res = strerror_r(error, buf_out, buf_out_len);
+	if (res != 0) {
+		if (errno == EINVAL) {
+			return TekVirtMemErrorStrRes_invalid_error_arg;
+		} else if (errno == ERANGE) {
+			return TekVirtMemErrorStrRes_not_enough_space_in_buffer;
+		}
+		tek_abort("unexpected errno: %u", errno);
+	}
+#else
+#error "unimplemented virtual memory error string"
+#endif
+	return TekVirtMemErrorStrRes_success;
+}
+
+uintptr_t tek_virt_mem_page_size() {
+#ifdef __linux__
+	return getpagesize();
+#elif _WIN32
+	SYSTEM_INFO si;
+    GetSystemInfo(&si);
+	// this actually returns the page granularity and not the page size.
+	// since Virtual{Alloc, Protect, Free}.lpAddress must be aligned to the page granularity (region of pages)
+	return si.dwAllocationGranularity;
+#endif
+}
+
+void* tek_virt_mem_reserve(void* requested_addr, uintptr_t size, TekVirtMemProtection protection) {
+	int prot = _tek_virt_mem_prot_unix(protection);
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+
+	// MAP_ANON = means map physical memory and not a file. it also means the memory will be initialized to zero
+	// MAP_PRIVATE = keep memory private so child process cannot access them
+	void* addr = mmap(requested_addr, size, prot, MAP_ANON | MAP_PRIVATE | MAP_NORESERVE, -1, 0);
+	return addr == MAP_FAILED ? NULL : addr;
 #else
 #error "TODO implement virtual memory for this platform"
 #endif
-	if (!success) {
-		TekWorker_terminate_out_of_memory(tek_thread_worker);
-	}
-
-	*size_in_out = size;
-	return ptr;
 }
 
-void tek_virt_mem_dealloc(void* ptr, uintptr_t size) {
+TekBool tek_virt_mem_protection_set(void* addr, uintptr_t size, TekVirtMemProtection protection) {
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+	int prot = _tek_virt_mem_prot_unix(protection);
+	return mprotect(addr, size, prot) == 0;
+#else
+#error "TODO implement virtual memory for this platform"
+#endif
+}
+
+TekBool tek_virt_mem_decommit(void* addr, uintptr_t size) {
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+	return madvise(addr, size, MADV_DONTNEED) == 0;
+#else
+#error "TODO implement virtual memory for this platform"
+#endif
+}
+
+TekBool tek_virt_mem_release(void* addr, uintptr_t size) {
 #ifdef __linux__
-	tek_assert(munmap(ptr, size) == 0, "munmap failed: 0x%x\n", errno);
+	return munmap(addr, size) == 0;
+#else
+#error "TODO implement virtual memory for this platform"
+#endif
+
+	return tek_true;
+}
+
+void* tek_virt_mem_map_file(char* path, TekVirtMemProtection protection, uintptr_t* size_out, TekVirtMemFileHandle* file_handle_out) {
+	if (protection == TekVirtMemProtection_no_access)
+		tek_abort("cannot map a file with no access");
+
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+	int prot = _tek_virt_mem_prot_unix(protection);
+
+	int fd_flags = 0;
+	switch (prot) {
+		case TekVirtMemProtection_read:
+		case TekVirtMemProtection_exec_read:
+			fd_flags = O_RDONLY;
+			break;
+		case TekVirtMemProtection_read_write:
+		case TekVirtMemProtection_exec_read_write:
+			fd_flags = O_RDWR;
+			break;
+	}
+
+	int fd = open(path, fd_flags);
+	if (fd == -1) return 0;
+
+	// get the size of the file
+	struct stat s = {0};
+	if (fstat(fd, &s) != 0) return 0;
+	uintptr_t size = s.st_size;
+
+	void* addr = mmap(NULL, size, prot, MAP_SHARED, fd, 0);
+	if (addr == MAP_FAILED) {
+		close(fd);
+		return NULL;
+	}
+	*size_out = size;
+	*file_handle_out = fd;
+	return addr;
+#else
+#error "TODO implement virtual memory for this platform"
+#endif
+}
+
+TekBool tek_virt_mem_map_file_close(TekVirtMemFileHandle file_handle) {
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+	return close(file_handle) == 0;
 #else
 #error "TODO implement virtual memory for this platform"
 #endif
@@ -1208,95 +1366,27 @@ void tek_virt_mem_dealloc(void* ptr, uintptr_t size) {
 //
 //===========================================================================================
 
-//
-// alloctates a new metadata table and makes it the current one.
-//
-void TekArenaAlctor_alloc_next_metadata_table(TekArenaAlctor* alctor) {
-	uintptr_t size = 0;
-	TekArenaMetadataTable* mt = tek_virt_mem_alloc(&size);
 
-	// end pointer points right after the last byte of the metadata table allocation.
-	void* end_ptr = tek_ptr_add(mt, size);
-
-	// calculate how many entries we can fit in the allocated metadata table.
-	mt->entries_cap = tek_ptr_diff(end_ptr, &mt->entries) / sizeof(TekArenaMetadata);
-
-	//
-	// make the old metadata table point to the new one.
-	if (alctor->metadata_table) {
-		mt->head_table = alctor->metadata_table->head_table; // get the head table from the old table.
-		alctor->metadata_table->next_table = mt;
-	} else {
-		mt->head_table = mt; // this is the head table
-	}
-
-	// make this the new current table
-	alctor->metadata_table = mt;
+TekVirtMemError TekLinearAlctor_init(TekLinearAlctor* alctor) {
+	void* data = tek_virt_mem_reserve(NULL, TekLinearAlctor_cap, TekVirtMemProtection_read_write);
+	if (data == NULL) return tek_virt_mem_get_last_error();
+	alctor->data = data;
+	return 0;
 }
 
-//
-// allocates a new arena and makes it the current one.
-//
-// @param size: size of the arena to allocate
-//
-void TekArenaAlctor_alloc_next_arena(TekArenaAlctor* alctor, uintptr_t size) {
-	//
-	// get the current metadata table. create a new one, if we have run out of arena entries.
-	TekArenaMetadataTable* mt = alctor->metadata_table;
-	if (mt->entries_count == mt->entries_cap) {
-		TekArenaAlctor_alloc_next_metadata_table(alctor);
-		mt = alctor->metadata_table;
-	}
-
-	void* arena = tek_virt_mem_alloc(&size);
-
-	//
-	// store the arena and size in the metadata table
-	TekArenaMetadata* md = &mt->entries[mt->entries_count];
-	md->arena = arena;
-	md->size = size;
-	mt->entries_count += 1;
-
-	//
-	// reset the position in the arena
-	alctor->pos = 0;
+void TekLinearAlctor_deinit(TekLinearAlctor* alctor) {
+	tek_virt_mem_release(alctor->data, TekLinearAlctor_cap);
+	alctor->data = NULL;
 }
 
-void TekArenaAlctor_init(TekArenaAlctor* alctor) {
-	*alctor = (TekArenaAlctor){0};
-	TekArenaAlctor_alloc_next_metadata_table(alctor);
-	TekArenaAlctor_alloc_next_arena(alctor, TekArenaAlctor_min_arena_size);
+void TekLinearAlctor_reset(TekLinearAlctor* alctor) {
+	tek_virt_mem_decommit(alctor->data, TekLinearAlctor_cap);
 }
 
-void TekArenaAlctor_deinit(TekArenaAlctor* alctor) {
-	//
-	// deallocate every arena that was allocated by going over all the metadata tables.
-	//
-	TekArenaMetadataTable* mt = alctor->metadata_table->head_table;
-	while (mt) {
-		for (uint32_t i = 0; i < mt->entries_count; i += 1) {
-			TekArenaMetadata* e = &mt->entries[i];
-			tek_virt_mem_dealloc(e->arena, e->size);
-		}
-		mt = mt->next_table;
-	}
-
-	//
-	// set all fields to zero so we do not use invalid memory.
-	*alctor = (TekArenaAlctor){0};
-}
-
-void TekArenaAlctor_reset(TekArenaAlctor* alctor) {
-	TekArenaAlctor_deinit(alctor);
-	TekArenaAlctor_init(alctor);
-}
-
-void* TekArenaAlctor_alloc(TekArenaAlctor* alctor, uintptr_t size, uintptr_t align) {
-	tek_assert(align <= 4096, "cannot align anymore than the minimum page size on all supported platforms of: 4096");
+void* TekLinearAlctor_alloc(TekLinearAlctor* alctor, uintptr_t size, uintptr_t align) {
+	tek_abort("unimplemented");
+	/*
 	while (1) {
-		// get the arena metadata.
-		TekArenaMetadata md = alctor->metadata_table->entries[alctor->metadata_table->entries_count - 1];
-
 		// an allocation gets the pointer by adding the position to the start of the buffer.
 		void* ptr = tek_ptr_add(md.arena, alctor->pos);
 		// rounds up the pointer so it aligned as requested.
@@ -1309,23 +1399,26 @@ void* TekArenaAlctor_alloc(TekArenaAlctor* alctor, uintptr_t size, uintptr_t ali
 			alctor->pos = next_pos;
 			return ptr;
 		} else {
-			uintptr_t arena_size = TekArenaAlctor_min_arena_size;
-			if (size > TekArenaAlctor_min_arena_size) {
+			uintptr_t arena_size = TekLinearAlctor_min_arena_size;
+			if (size > TekLinearAlctor_min_arena_size) {
 				arena_size = size;
 			}
-			TekArenaAlctor_alloc_next_arena(alctor, arena_size);
+			TekLinearAlctor_alloc_next_arena(alctor, arena_size);
 		}
 	}
+	*/
 }
 
-void* TekArenaAlctor_TekAlctor_fn(void* alctor_data, void* ptr, uintptr_t old_size, uintptr_t size, uintptr_t align) {
-	TekArenaAlctor* alctor = alctor_data;
+void* TekLinearAlctor_TekAlctor_fn(void* alctor_data, void* ptr, uintptr_t old_size, uintptr_t size, uintptr_t align) {
+	tek_abort("unimplemented");
+	/*
+	TekLinearAlctor* alctor = alctor_data;
 	if (!ptr && size == 0) {
-		TekArenaAlctor_reset(alctor);
+		TekLinearAlctor_reset(alctor);
 	} else if (!ptr) {
-		return TekArenaAlctor_alloc(alctor, size, align);
+		return TekLinearAlctor_alloc(alctor, size, align);
 	} else if (ptr && size > 0) {
-		void* new_ptr =  TekArenaAlctor_alloc(alctor, size, align);
+		void* new_ptr =  TekLinearAlctor_alloc(alctor, size, align);
 		tek_copy_bytes(new_ptr, ptr, tek_min(old_size, size));
 		return new_ptr;
 	} else {
@@ -1333,6 +1426,7 @@ void* TekArenaAlctor_TekAlctor_fn(void* alctor_data, void* ptr, uintptr_t old_si
 	}
 
 	return NULL;
+	*/
 }
 
 //===========================================================================================
@@ -1344,15 +1438,6 @@ void* TekArenaAlctor_TekAlctor_fn(void* alctor_data, void* ptr, uintptr_t old_si
 //===========================================================================================
 
 static char* tek_mtx_already_locked_msg = "attempting to unlock a mutex that is already unlocked, did you unlock this earlier or maybe from another thread?";
-
-static void tek_worker_locking_resource_HACK() {
-	if (tek_thread_worker && atomic_load(&tek_thread_worker->c->flags) & TekCompilerFlags_out_of_memory) {
-		// TODO see if there is a better way of doing this.
-		// a memory allocation can fail while holding a lock.
-		// so if this happens, then terminate everything that is trying to lock a resource.
-		TekWorker_terminate(tek_thread_worker, 1);
-	}
-}
 
 void TekMtx_lock(TekMtx* mtx) {
     int pass;
@@ -1400,7 +1485,6 @@ void TekSpinMtx_lock(TekSpinMtx* mtx) {
     TekBool pass = tek_false;
     while (!atomic_compare_exchange_weak(&mtx->_locked, &pass, tek_true)) {
         pass = tek_false;
-		tek_worker_locking_resource_HACK();
         tek_cpu_relax();
     }
 }
@@ -1414,8 +1498,6 @@ void TekSpinMtx_unlock(TekSpinMtx* mtx) {
 
 void TekSpinRWLock_lock_for_read(TekSpinRWLock* lock) {
     while (1) {
-		tek_worker_locking_resource_HACK();
-
         if (atomic_load(&lock->_write_access_count) > 0) {
             tek_cpu_relax();
             continue;
@@ -1468,6 +1550,20 @@ void TekSpinRWLock_unlock_for_read(TekSpinRWLock* lock) {
 
 void TekSpinRWLock_unlock_for_write(TekSpinRWLock* lock) {
     atomic_fetch_sub(&lock->_write_access_count, 1);
+}
+
+uint32_t tek_atomic_find_key_32(_Atomic uint32_t* keys, uint32_t key, uint32_t start_idx, uint32_t end_idx) {
+	for (uint32_t i = start_idx; i < end_idx; i += 1) {
+		if (atomic_load(&keys[i]) == key) return i + 1;
+	}
+	return 0;
+}
+
+uint32_t tek_atomic_find_key_64(_Atomic uint64_t* keys, uint64_t key, uint32_t start_idx, uint32_t end_idx) {
+	for (uint32_t i = start_idx; i < end_idx; i += 1) {
+		if (atomic_load(&keys[i]) == key) return i + 1;
+	}
+	return 0;
 }
 
 //===========================================================================================

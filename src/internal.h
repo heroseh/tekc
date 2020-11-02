@@ -15,6 +15,8 @@
 //
 //===========================================================================================
 
+typedef uint16_t TekLibId;
+typedef uint32_t TekFileId;
 typedef uint32_t TekCodeLocId;
 typedef struct TekCodeLoc TekCodeLoc;
 typedef union TekValue TekValue;
@@ -28,7 +30,7 @@ typedef_TekStk(TekLibPtr);
 typedef struct TekCompiler TekCompiler;
 
 struct TekCodeLoc {
-	TekFile* file;
+	TekFileId file_id;
 	uint32_t line;
 	uint32_t column;
 };
@@ -79,6 +81,125 @@ enum {
 	TekUnaryOp_deref,
 	TekUnaryOp_COUNT,
 };
+
+//===========================================================================================
+//
+//
+// Memory Allocation
+//
+//
+//===========================================================================================
+#define TekLinearAlctor_cap 0x1000000000 // 10GB
+
+#define Tek1TB   0x10000000000
+#define Tek512GB 0x8000000000
+#define Tek256GB 0x4000000000
+#define Tek128GB 0x2000000000
+#define Tek64GB  0x1000000000
+#define Tek32GB  0x800000000
+#define Tek16GB  0x400000000
+#define Tek8GB   0x200000000
+#define Tek4GB   0x100000000
+#define Tek2GB   0x80000000
+#define Tek1GB   0x40000000
+#define Tek512MB 0x20000000
+#define Tek256MB 0x10000000
+#define Tek128MB 0x8000000
+#define Tek64MB  0x4000000
+#define Tek32MB  0x2000000
+#define Tek16MB  0x1000000
+#define Tek8MB   0x800000
+#define Tek4MB   0x400000
+#define Tek2MB   0x200000
+#define Tek1MB   0x100000
+#define Tek512KB 0x80000
+#define Tek256KB 0x40000
+#define Tek128KB 0x20000
+#define Tek64KB  0x10000
+#define Tek32KB  0x8000
+#define Tek16KB  0x4000
+#define Tek8KB   0x2000
+#define Tek4KB   0x1000
+#define Tek2KB   0x800
+#define Tek1KB   0x400
+#define Tek512B  0x200
+#define Tek256B  0x100
+#define Tek128B  0x80
+#define Tek64B   0x40
+#define Tek32B   0x20
+#define Tek16B   0x10
+#define Tek8B    0x8
+#define Tek4B    0x4
+#define Tek2B    0x2
+#define Tek1B    0x1
+
+typedef uint8_t TekMemSegCompiler;
+enum {
+	TekMemSegCompiler_compiler_struct, // TekCompiler
+	TekMemSegCompiler_workers, // TekWorker
+	TekMemSegCompiler_libs, // TekLib
+	TekMemSegCompiler_file_paths, // TekStrId
+	TekMemSegCompiler_files, // TekFile
+	TekMemSegCompiler_strtab_hashes, // TekHash
+	TekMemSegCompiler_strtab_entries, // TekStrEntry
+	TekMemSegCompiler_strtab_strings, // char
+	TekMemSegCompiler_jobs, // TekJob
+	TekMemSegCompiler_errors, // TekError
+	TekMemSegCompiler_COUNT,
+};
+
+static uintptr_t TekMemSegCompiler_sizes[TekMemSegCompiler_COUNT] = {
+	[TekMemSegCompiler_compiler_struct] = Tek1MB,
+	[TekMemSegCompiler_workers] = Tek1MB,
+	[TekMemSegCompiler_libs] = Tek4MB,
+	[TekMemSegCompiler_file_paths] = Tek1MB,
+	[TekMemSegCompiler_files] = Tek16MB,
+	[TekMemSegCompiler_strtab_hashes] = Tek4MB,
+	[TekMemSegCompiler_strtab_entries] = Tek8MB,
+	[TekMemSegCompiler_strtab_strings] = Tek8GB,
+	[TekMemSegCompiler_jobs] = Tek4MB,
+	[TekMemSegCompiler_errors] = Tek4MB,
+};
+
+typedef uint8_t TekMemSegLib;
+enum {
+	TekMemSegLib_files, // TekFileId
+	TekMemSegLib_dependers, // TekLibId
+	TekMemSegLib_dependencies, // TekLibId
+	TekMemSegLib_COUNT,
+};
+
+static uintptr_t TekMemSegLib_sizes[TekMemSegLib_COUNT] = {
+	[TekMemSegLib_files] = Tek1MB,
+	[TekMemSegLib_dependers] = Tek1MB,
+	[TekMemSegLib_dependencies] = Tek1MB,
+};
+
+typedef uint8_t TekMemSegFile;
+enum {
+	TekMemSegFile_token_locs, // TekTokenLoc
+	TekMemSegFile_tokens, // TekToken
+	TekMemSegFile_token_values, // TekValue
+	TekMemSegFile_string_buf, // char
+	TekMemSegFile_line_code_start_indices, // uintptr_t
+	TekMemSegFile_ast_token_indices, // uint32_t
+	TekMemSegFile_ast_nodes, // TekAstNode
+	TekMemSegFile_COUNT,
+};
+
+static uintptr_t TekMemSegFile_sizes[TekMemSegFile_COUNT] = {
+	[TekMemSegFile_token_locs] = Tek4GB,
+	[TekMemSegFile_tokens] = Tek4GB,
+	[TekMemSegFile_token_values] = Tek4GB,
+	[TekMemSegFile_string_buf] = Tek4GB,
+	[TekMemSegFile_line_code_start_indices] = Tek4GB,
+	[TekMemSegFile_ast_token_indices] = Tek4GB,
+	[TekMemSegFile_ast_nodes] = Tek4GB,
+};
+
+TekVirtMemError tek_mem_segs_reserve(uint8_t memsegs_count, uintptr_t* memsegs_sizes, void** segments_out);
+TekVirtMemError tek_mem_segs_reset(uint8_t memsegs_count, uintptr_t* memsegs_sizes, void** segments);
+TekVirtMemError tek_mem_segs_release(uint8_t memsegs_count, uintptr_t* memsegs_sizes, void** segments_in_out);
 
 //===========================================================================================
 //
@@ -234,23 +355,14 @@ struct TekLexerStrEntry {
 };
 
 struct TekLexer {
-	TekTokenLoc* token_locs;
-	TekToken* tokens;
-	uint32_t tokens_count;
-	uint32_t tokens_cap;
-	TekStk(uint32_t) line_code_start_indices;
-	TekStk(TekValue) token_values;
-	TekStk(TekTokenOpenBracket) open_brackets;
-	TekStk(char) string_buf;
-	TekStk(TekLexerStrEntry) str_entries;
 	char* code;
-	uint32_t code_len;
+	uintptr_t code_len;
+	uintptr_t code_idx;
 	uint32_t line;
 	uint32_t column;
-	uint32_t code_idx;
 };
 
-extern TekBool TekLexer_lex(TekLexer* lexer, TekCompiler* c, TekFile* file);
+extern TekBool TekLexer_lex(TekLexer* lexer, TekCompiler* c, TekFileId file_id);
 
 //===========================================================================================
 //
@@ -699,7 +811,7 @@ typedef_TekStk(TekError);
 typedef struct TekErrorArg TekErrorArg;
 
 struct TekErrorArg {
-	TekFile* file;
+	TekFileId file_id;
 	union {
 		uint8_t byte;
 		uint32_t num;
@@ -707,6 +819,7 @@ struct TekErrorArg {
 		uint32_t token_idx;
 		char* file_path;
 		TekStrId str_id;
+		TekVirtMemError virt_mem_error;
 	};
 };
 
@@ -717,6 +830,7 @@ struct TekError {
 
 enum {
 	TekErrorKind_none,
+	TekErrorKind_virt_mem, // args[0].virt_mem_error
 
 	TekErrorKind_invalid_file_path, // args[0].file_path, args[1].errnum
 	TekErrorKind_lib_root_file_is_used_in_another_lib, // root_file: args[0].str_id, culprit: args[1].str_id
@@ -724,7 +838,7 @@ enum {
 	//
 	// Lexer
 	//
-	TekErrorKind_lexer_file_read_failed, // args[0].file_path, args[1].errnum
+	TekErrorKind_lexer_file_read_failed, // args[0].file_path, args[1].virt_mem
 	TekErrorKind_lexer_no_open_brackets_to_close, // location: args[0].token_idx
 	TekErrorKind_lexer_binary_integer_can_only_have_zero_and_one, // location: args[0].token_idx
 	TekErrorKind_lexer_octal_integer_has_a_max_digit_of_seven, // location: args[0].token_idx
@@ -787,110 +901,135 @@ struct TekJob {
 	TekJobType type;
 	uint8_t counter;
 	union {
-		TekFile* file;
+		TekFileId file_id;
 	};
 };
 
 struct TekJobList {
 	TekJobId head;
 	TekJobId tail;
+	TekSpinMtx mtx;
 };
 
 struct TekFile {
+	void* segments[TekMemSegFile_COUNT];
 	char* code;
-	uint32_t* line_code_start_indices;
-	TekTokenLoc* token_locs;
-	TekToken* tokens;
-	TekValue* token_values;
-	uint32_t code_len;
+	uintptr_t size;
+	TekVirtMemFileHandle handle;
+	TekFileId id;
+	TekStrId path_str_id;
+	//
+	// these do not need to be atomic, since a single thread
+	// will increment these apon creation.
 	uint32_t tokens_count;
 	uint32_t token_values_count;
 	uint32_t lines_count;
-	TekStrId path_str_id;
-
-	uint32_t* ast_node_token_indexes;
-	TekAstNode* ast_nodes;
 	uint32_t ast_nodes_count;
-	uint32_t ast_nodes_cap;
 };
 
+static inline TekTokenLoc* TekFile_token_locs(TekFile* file) { return file->segments[TekMemSegFile_token_locs]; }
+static inline TekToken* TekFile_tokens(TekFile* file) { return file->segments[TekMemSegFile_tokens]; }
+static inline TekValue* TekFile_token_values(TekFile* file) { return file->segments[TekMemSegFile_token_values]; }
+static inline char* TekFile_string_buf(TekFile* file) { return file->segments[TekMemSegFile_string_buf]; }
+static inline uintptr_t* TekFile_line_code_start_indices(TekFile* file) { return file->segments[TekMemSegFile_line_code_start_indices]; }
+static inline uint32_t* TekFile_ast_token_indices(TekFile* file) { return file->segments[TekMemSegFile_ast_token_indices]; }
+static inline TekAstNode* TekFile_ast_nodes(TekFile* file) { return file->segments[TekMemSegFile_ast_nodes]; }
+
 struct TekLib {
-	TekStk(TekFilePtr) files;
-	TekStk(TekLibPtr) dependers;
-	TekStk(TekLibPtr) dependencies;
+	void* segments[TekMemSegLib_COUNT];
+	_Atomic uint32_t files_count;
+	_Atomic uint32_t dependers_count;
+	_Atomic uint32_t dependencies_count;
+	TekLibId id;
 	TekStrId name;
 };
 
-extern thread_local TekWorker* tek_thread_worker;
+static inline TekFileId* TekLib_files(TekLib* lib) { return lib->segments[TekMemSegLib_files]; }
+static inline TekLibId* TekLib_dependers(TekLib* lib) { return lib->segments[TekMemSegLib_dependers]; }
+static inline TekLibId* TekLib_dependencies(TekLib* lib) { return lib->segments[TekMemSegLib_dependencies]; }
+
 struct TekWorker {
 	TekCompiler* c;
 	thrd_t thread;
 	TekLexer lexer;
 	TekParser parser;
-	TekArenaAlctor arena_alctor;
 };
 
 typedef uint32_t TekCompilerFlags;
 enum {
 	TekCompilerFlags_is_stopping = 0x1,
 	TekCompilerFlags_out_of_memory = 0x2,
+	TekCompilerFlags_starting_up = 0x4,
+	TekCompilerFlags_is_running = 0x8,
 };
 
 typedef_TekKVStk(TekStrId, TekFilePtr);
 
 struct TekCompiler {
 	_Atomic TekCompilerFlags flags;
-	TekCompileArgs* compile_args;
-	TekStk(TekLibPtr) libs;
-	TekKVStk(TekStrId, TekFilePtr) files; // TekStrId key == file path
-	TekStrTab strtab;
-	TekStk(TekError) errors;
-
-	struct {
-		TekSpinMtx libs;
-		TekSpinMtx files;
-		TekSpinMtx strtab;
-		TekSpinMtx errors;
-	} lock;
-
-	struct {
-		TekMtx mtx;
-		_Atomic uint16_t workers_running_count;
-	} wait;
-
-	struct {
-		TekPool(TekJob) pool;
-		TekJobList* type_to_job_list_map;
-		TekJobList* type_to_job_list_map_failed;
-		uint32_t failed_count;
-		uint32_t failed_count_last_iteration;
-	} job_sys;
-
-	TekWorker* workers;
 	uint16_t workers_count;
 	_Atomic uint16_t stalled_workers_count;
+	_Atomic uint16_t running_workers_count;
+	TekCompileArgs* compile_args;
+
+	void* segments[TekMemSegCompiler_COUNT];
+	_Atomic uint32_t libs_count;
+	_Atomic uint32_t files_count;
+	_Atomic uint32_t jobs_count;
+	_Atomic uint32_t errors_count;
+	_Atomic uint32_t strtab_entries_count;
+	_Atomic uintptr_t strtab_strings_size;
+
+	TekMtx wait_mtx;
+
+	struct {
+		_Atomic uint32_t available_count;
+		_Atomic uint32_t failed_count;
+		uint32_t failed_count_last_iteration;
+		TekJobList free_list;
+		TekJobList type_to_job_list_map[TekJobType_COUNT];
+		TekJobList type_to_job_list_map_failed[TekJobType_COUNT];
+	} job_sys;
 };
+
+static inline TekWorker* TekCompiler_workers(TekCompiler* c) { return c->segments[TekMemSegCompiler_workers]; }
+static inline TekLib* TekCompiler_libs(TekCompiler* c) { return c->segments[TekMemSegCompiler_libs]; }
+static inline _Atomic TekStrId* TekCompiler_file_paths(TekCompiler* c) { return c->segments[TekMemSegCompiler_file_paths]; }
+static inline TekFile* TekCompiler_files(TekCompiler* c) { return c->segments[TekMemSegCompiler_files]; }
+static inline _Atomic TekHash* TekCompiler_strtab_hashes(TekCompiler* c) { return c->segments[TekMemSegCompiler_strtab_hashes]; }
+static inline _Atomic TekStrEntry* TekCompiler_strtab_entries(TekCompiler* c) { return c->segments[TekMemSegCompiler_strtab_entries]; }
+static inline char* TekCompiler_strtab_strings(TekCompiler* c) { return c->segments[TekMemSegCompiler_strtab_strings]; }
+static inline TekJob* TekCompiler_jobs(TekCompiler* c) { return c->segments[TekMemSegCompiler_jobs]; }
+static inline TekError* TekCompiler_errors(TekCompiler* c) { return c->segments[TekMemSegCompiler_errors]; }
 
 struct TekCompileArgs {
 	char* file_path;
 };
 
+typedef uint8_t TekCompilerError;
+enum {
+	TekCompilerError_none,
+	TekCompilerError_already_running,
+	TekCompilerError_failed_to_start_worker_threads,
+	TekCompilerError_compile_error,
+};
+
 extern TekJob* TekCompiler_job_queue(TekCompiler* c, TekJobType type);
-extern void TekCompiler_init(TekCompiler* c, uint32_t workers_count);
+extern TekCompiler* TekCompiler_init();
 extern void TekCompiler_deinit(TekCompiler* c);
-extern TekFile* TekCompiler_file_create(TekCompiler* c, char* file_path, TekStrId parent_file_path_str_id, TekBool is_lib_root);
-extern void TekCompiler_lib_create(TekCompiler* c, char* root_src_file_path);
-extern void TekCompiler_error_add(TekCompiler* c, TekError* error);
+extern TekFileId TekCompiler_file_create(TekCompiler* c, char* file_path, TekStrId parent_file_path_str_id, TekBool is_lib_root);
+extern TekFile* TekCompiler_file_get(TekCompiler* c, TekFileId file_id);
+extern TekLibId TekCompiler_lib_create(TekCompiler* c, char* root_src_file_path);
+extern TekLib* TekCompiler_lib_get(TekCompiler* c, TekLibId lib_id);
+extern TekError* TekCompiler_error_add(TekCompiler* c, TekErrorKind kind);
 extern void TekCompiler_signal_stop(TekCompiler* c);
 extern TekStrId TekCompiler_strtab_get_or_insert(TekCompiler* c, char* str, uint32_t str_len);
 extern TekStrEntry TekCompiler_strtab_get_entry(TekCompiler* c, TekStrId str_id);
 extern TekBool TekCompiler_has_errors(TekCompiler* c);
+extern TekBool TekCompiler_out_of_memory(TekCompiler* c);
 
-extern void TekCompiler_compile_start(TekCompiler* c, TekCompileArgs* args);
-extern void TekCompiler_compile_wait(TekCompiler* c);
+TekCompilerError TekCompiler_compile_start(TekCompiler* c, uint16_t workers_count, TekCompileArgs* args);
+extern TekCompilerError TekCompiler_compile_wait(TekCompiler* c);
 extern void TekCompiler_errors_string(TekCompiler* c, TekStk(char)* string_out, TekBool use_ascii_colors);
-
-extern noreturn void TekWorker_terminate(TekWorker* w, int exit_code);
-extern noreturn void TekWorker_terminate_out_of_memory(TekWorker* w);
 
 #endif // TEK_INTERNAL_H

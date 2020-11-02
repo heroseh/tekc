@@ -26,23 +26,20 @@ int main(int argc, char** argv) {
 
 
 	int threads_count = 1;
-	/*
 #ifdef __linux__
 	threads_count = sysconf(_SC_NPROCESSORS_ONLN);
 #else
 #error "TODO implement for this platform"
 #endif
-*/
 
-	TekCompiler c;
-	TekCompiler_init(&c, threads_count);
+	TekCompiler* c = TekCompiler_init();
 
-	TekCompiler_compile_start(&c, &compile_args);
-	TekCompiler_compile_wait(&c);
+	TekCompiler_compile_start(c, threads_count, &compile_args);
+	TekCompiler_compile_wait(c);
 
-	if (TekCompiler_has_errors(&c)) {
+	if (TekCompiler_has_errors(c)) {
 		TekStk(char) error_string = {0};
-		TekCompiler_errors_string(&c, &error_string, tek_true);
+		TekCompiler_errors_string(c, &error_string, tek_true);
 		printf("%.*s", error_string.count, error_string.TekStk_data);
 	}
 

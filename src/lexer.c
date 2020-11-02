@@ -96,7 +96,7 @@ static inline void _TekLexer_advance_column(TekLexer* lexer, uint32_t by) {
 	lexer->column += by;
 }
 
-static inline void _TekLexer_advance_line(TekLexer* lexer) {
+static inline void _TekLexer_advance_line(TekLexer* lexer, TekFile* file) {
 	uint8_t byte = _TekLexer_peek_byte(lexer);
 	if (byte == '\r') {
 		lexer->code_idx += 1;
@@ -108,9 +108,11 @@ static inline void _TekLexer_advance_line(TekLexer* lexer) {
 		lexer->code_idx += 1;
 	}
 
-	printf("line %u: %.*s\n", lexer->line + 1, 10, lexer->code + lexer->code_idx);
+	//printf("line %u: %.*s\n", lexer->line + 1, 10, lexer->code + lexer->code_idx);
 
-	*TekStk_push(&lexer->line_code_start_indices, NULL) = lexer->code_idx;
+	uintptr_t* line_code_start_indices = TekFile_line_code_start_indices(file);
+	line_code_start_indices[file->lines_count] = lexer->code_idx;
+	file->lines_count += 1;
 	lexer->line += 1;
 	lexer->column = 1;
 }
@@ -130,55 +132,22 @@ static TekBool _TekLexer_compare_consume(TekLexer* lexer, char* str, uint32_t st
 	return tek_true;
 }
 
-TekBool _TekLexer_string_skip_char(TekLexer* lexer) {
-	uint8_t byte = _TekLexer_peek_byte(lexer);
-	if (byte == '\r' || byte == '\n') {
-		_TekLexer_advance_line(lexer);
-	} else if (byte == ' ' || byte == '\t') {
-		_TekLexer_advance_column(lexer, 1);
-	} else {
-		return tek_false;
-	}
-	return tek_true;
-}
-
-void _TekLexer_push_str_entry(TekLexer* lexer, uint32_t idx, uint32_t str_len, TekBool is_ident) {
-	*TekStk_push(&lexer->str_entries, NULL) = (TekLexerStrEntry) {
-		.string_buf_idx = idx,
-		.str_len = str_len,
-		.token_values_idx = lexer->token_values.count,
-		.is_ident = is_ident,
-	};
-	// push an uninitialized token value to be set once deduplicated
-	TekStk_push(&lexer->token_values, NULL);
-}
-
-void TekLexer_token_add(TekLexer* lexer, TekToken token, uint32_t code_idx_start, uint32_t code_idx_end, uint32_t line_start, uint32_t column_start) {
-	//
-	// extend the tokens capacity if required.
-	if (lexer->tokens_count == lexer->tokens_cap) {
-		tek_assert(lexer->tokens_cap < UINT32_MAX, "maximum number of tokens reached: %u", UINT32_MAX);
-		uintptr_t new_cap = (uintptr_t)lexer->tokens_cap * 2;
-		if (new_cap > UINT32_MAX) new_cap = UINT32_MAX;
-
-		lexer->token_locs = tek_realloc_array(lexer->token_locs, lexer->tokens_cap, new_cap);
-		lexer->tokens = tek_realloc_array(lexer->tokens, lexer->tokens_cap, new_cap);
-		lexer->tokens_cap = new_cap;
-
-	}
+void TekLexer_token_add(TekLexer* lexer, TekFile* file, TekToken token, uint32_t code_idx_start, uint32_t code_idx_end, uint32_t line_start, uint32_t column_start) {
+	TekTokenLoc* token_locs = TekFile_token_locs(file);
+	TekToken* tokens = TekFile_tokens(file);
 
 	//
 	// insert the token and it's location into the arrays
-	uint32_t insert_idx = lexer->tokens_count;
-	lexer->token_locs[insert_idx] = (TekTokenLoc) {
+	uint32_t insert_idx = file->tokens_count;
+	token_locs[insert_idx] = (TekTokenLoc) {
 		.code_idx_start = code_idx_start,
 		.code_idx_end = code_idx_end,
 		.line = line_start,
 		.column = column_start,
 	};
 
-	lexer->tokens[insert_idx] = token;
-	lexer->tokens_count += 1;
+	tokens[insert_idx] = token;
+	file->tokens_count += 1;
 }
 
 char* TekToken_strings_non_ascii[] = {
@@ -282,65 +251,21 @@ char* TekToken_strings_non_ascii[] = {
     [TekToken_directive_intrinsic] = "#intrinsic",
 };
 
-void TekLexer_copy_to_file(TekLexer* lexer, TekFile* file) {
-	file->code = lexer->code;
-	file->code_len = lexer->code_len;
+TekBool TekLexer_lex(TekLexer* lexer, TekCompiler* c, TekFileId file_id) {
+	TekTokenOpenBracket open_brackets[tek_lexer_cap_open_brackets] = {0};
+	uint32_t open_brackets_count = 0;
 
-	if (lexer->tokens_count) {
-		file->token_locs = tek_alloc_array(TekTokenLoc, lexer->tokens_count);
-		tek_copy_elmts(file->token_locs, lexer->token_locs, lexer->tokens_count);
-		file->tokens = tek_alloc_array(TekToken, lexer->tokens_count);
-		tek_copy_elmts(file->tokens, lexer->tokens, lexer->tokens_count);
-		file->tokens_count = lexer->tokens_count;
-	}
-
-	if (lexer->token_values.count) {
-		file->token_values = tek_alloc_array(TekValue, lexer->token_values.count);
-		tek_copy_elmts(file->token_values, lexer->token_values.TekStk_data, lexer->token_values.count);
-		file->token_values_count = lexer->token_values.count;
-	}
-
-	if (lexer->line_code_start_indices.count) {
-		file->line_code_start_indices = tek_alloc_array(uint32_t, lexer->line_code_start_indices.count);
-		tek_copy_elmts(file->line_code_start_indices, lexer->line_code_start_indices.TekStk_data, lexer->line_code_start_indices.count);
-		file->lines_count = lexer->line_code_start_indices.count;
-	}
-}
-
-TekBool TekLexer_lex(TekLexer* lexer, TekCompiler* c, TekFile* file) {
 	//
 	// reset the lexer
-	TekStk_clear(&lexer->open_brackets);
-	TekStk_clear(&lexer->token_values);
-	TekStk_clear(&lexer->string_buf);
-	TekStk_clear(&lexer->str_entries);
-	TekStk_clear(&lexer->line_code_start_indices);
-	*TekStk_push(&lexer->line_code_start_indices, NULL) = 0;
-	lexer->column = 1;
-	lexer->line = 1;
-	lexer->tokens_count = 0;
-	lexer->code_idx = 0;
-	lexer->code = NULL;
-	lexer->code_len = 0;
-
+	tek_zero_elmt(lexer);
 	TekError error = {0};
 
-	char* path = TekStrEntry_value(TekCompiler_strtab_get_entry(c, file->path_str_id));
+	TekFile* file = TekCompiler_file_get(c, file_id);
 
 	//
-	// read in the whole file
-	{
-		TekStk(char) code = {0};
-		int res = tek_file_read(path, &code);
-		if (res != 0) {
-			error.kind = TekErrorKind_lexer_file_read_failed;
-			error.args[0].file = file;
-			error.args[1].errnum = res;
-			goto BAIL_PUSH_ERROR;
-		}
-		lexer->code = code.TekStk_data;
-		lexer->code_len = code.count;
-	}
+	// setup the lexer to use the file
+	lexer->code = file->code;
+	lexer->code_len = file->size;
 
 #define bail(kind_) \
 	{ \
@@ -353,6 +278,12 @@ TekBool TekLexer_lex(TekLexer* lexer, TekCompiler* c, TekFile* file) {
 	TekToken open_variant;
 	TekBool is_signed;
 	TekToken token;
+	TekTokenLoc* token_locs = TekFile_token_locs(file);
+	TekToken* tokens = TekFile_tokens(file);
+	TekValue* token_values = TekFile_token_values(file);
+	uintptr_t* line_code_start_indices = TekFile_line_code_start_indices(file);
+	char* string_buf = TekFile_string_buf(file);
+	uintptr_t string_buf_size;
 	while (_TekLexer_has_code(lexer)) {
 		token = _TekLexer_peek_byte(lexer);
 		code_idx_start = lexer->code_idx;
@@ -395,15 +326,15 @@ TekBool TekLexer_lex(TekLexer* lexer, TekCompiler* c, TekFile* file) {
 					switch (_TekLexer_peek_byte(lexer)) {
 						case ';': _TekLexer_advance_column(lexer, 1); break;
 						case '\r':
-						case '\n': _TekLexer_advance_line(lexer); break;
+						case '\n': _TekLexer_advance_line(lexer, file); break;
 						default: goto NEW_LINE_END;
 					}
 				} while (_TekLexer_has_code(lexer));
 NEW_LINE_END:
 				//
 				// block comment will allow a newline to be made twice, so combine them if this happens.
-				if (lexer->tokens_count > 0 && lexer->tokens[lexer->tokens_count - 1] == '\n') {
-					TekTokenLoc* prev_loc = &lexer->token_locs[lexer->tokens_count - 1];
+				if (file->tokens_count > 0 && tokens[file->tokens_count - 1] == '\n') {
+					TekTokenLoc* prev_loc = &token_locs[file->tokens_count - 1];
 					prev_loc->code_idx_end = lexer->code_idx;
 					continue;
 				}
@@ -415,8 +346,10 @@ NEW_LINE_END:
 			case '(':
 			case '{':
 			case '[': {
-				*TekStk_push(&lexer->open_brackets, NULL) =
-					(TekTokenOpenBracket){ .token = token, .token_idx = lexer->tokens_count };
+				tek_assert(open_brackets_count < tek_lexer_cap_open_brackets, "maximum number of open brackets has been reached: %u", tek_lexer_cap_open_brackets);
+				open_brackets[open_brackets_count] =
+					(TekTokenOpenBracket){ .token = token, .token_idx = file->tokens_count };
+				open_brackets_count += 1;
 				break;
 			};
 			case ')':
@@ -428,13 +361,13 @@ NEW_LINE_END:
 			case ']': {
 				open_variant = '[';
 CHECK_CLOSE_BRACKET:
-				if (lexer->open_brackets.count == 0)
+				if (open_brackets_count == 0)
 					bail(TekErrorKind_lexer_no_open_brackets_to_close);
 
-				if (TekStk_get_last(&lexer->open_brackets)->token != open_variant) {
+				if (open_brackets[open_brackets_count - 1].token != open_variant) {
 					goto BAIL_INCORRECT_CLOSE_BRACKET;
 				}
-				TekStk_pop(&lexer->open_brackets, NULL);
+				open_brackets_count -= 1;
 				break;
 			};
 
@@ -559,7 +492,8 @@ NUM_CONTINUE:
 NUM_ANALYZE_END: {}
 
 				num_buf[num_buf_count] = '\0';
-				TekValue* value = TekStk_push(&lexer->token_values, NULL);
+				TekValue* value = &token_values[file->token_values_count];
+				file->token_values_count += 1;
 				char* end_ptr = NULL;
 				switch (token) {
 					case TekToken_lit_uint:
@@ -594,7 +528,7 @@ NUM_ANALYZE_END: {}
 			//
 			case '"': {
 				token = TekToken_lit_string;
-				uint32_t string_buf_idx = lexer->string_buf.count;
+				string_buf_size = 0;
 
 				_TekLexer_advance_column(lexer, 1);
 
@@ -611,14 +545,15 @@ NUM_ANALYZE_END: {}
 				// also strings that start with a new line can have new lines in them.
 				if (byte == '\r' || byte == '\n') {
 					allow_new_line = tek_true;
-					_TekLexer_advance_line(lexer);
+					_TekLexer_advance_line(lexer, file);
 					indent_char = _TekLexer_peek_byte(lexer);
 					while (1) {
 						if (!_TekLexer_has_code(lexer)) bail(TekErrorKind_lexer_unclosed_string_literal);
 						byte = _TekLexer_peek_byte(lexer);
 						if (byte == '\r' || byte == '\n') {
-							_TekLexer_advance_line(lexer);
-							*TekStk_push(&lexer->string_buf, NULL) = byte;
+							_TekLexer_advance_line(lexer, file);
+							string_buf[string_buf_size] = byte;
+							string_buf_size += 1;
 							indent_char = _TekLexer_peek_byte(lexer);
 						} else if (byte == ' ' || byte == '\t') {
 							if (byte != indent_char)
@@ -642,8 +577,9 @@ NUM_ANALYZE_END: {}
 							byte = _TekLexer_peek_byte(lexer);
 							if (byte == '"') break;
 							if (byte == '\r' || byte == '\n') {
-								_TekLexer_advance_line(lexer);
-								*TekStk_push(&lexer->string_buf, NULL) = byte;
+								_TekLexer_advance_line(lexer, file);
+								string_buf[string_buf_size] = byte;
+								string_buf_size += 1;
 							} else if (byte == ' ' || byte == '\t') {
 								if (byte != indent_char) {
 									error.kind = TekErrorKind_lexer_multiline_string_indent_different_char;
@@ -654,12 +590,12 @@ NUM_ANALYZE_END: {}
 								error.kind = TekErrorKind_lexer_multiline_string_indent_is_not_enough;
 STRING_ERR:
 								// push a dummy token where the indentation was defined
-								error.args[1].file = file;
-								error.args[1].token_idx = lexer->tokens_count;
-								code_idx_start = *TekStk_get(&lexer->line_code_start_indices, indent_line - 1);
-								TekLexer_token_add(lexer, 0, code_idx_start, code_idx_start + newline_ignore_whitespace_upto - 1, indent_line, 1);
+								error.args[1].file_id = file_id;
+								error.args[1].token_idx = file->tokens_count;
+								code_idx_start = line_code_start_indices[indent_line - 1];
+								TekLexer_token_add(lexer, file, 0, code_idx_start, code_idx_start + newline_ignore_whitespace_upto - 1, indent_line, 1);
 
-								code_idx_start = *TekStk_get(&lexer->line_code_start_indices, lexer->line - 1);
+								code_idx_start = line_code_start_indices[indent_line - 1];
 								line_start = lexer->line;
 								bail(error.kind);
 							}
@@ -668,14 +604,20 @@ STRING_ERR:
 
 					uint8_t byte = _TekLexer_peek_byte(lexer);
 					if (byte == '"') {
-						if (allow_new_line && lexer->column < newline_ignore_whitespace_upto && lexer->string_buf.count) {
-							char byte = *TekStk_get_last(&lexer->string_buf);
+						//
+						// for multiline strings, we allow the string to be terminated on the
+						// next line without including the new line character.
+						// so if the string terminator is before the indent of the multiline string.
+						// return the new line character/s.
+						//
+						if (allow_new_line && lexer->column < newline_ignore_whitespace_upto && string_buf_size) {
+							char byte = string_buf[string_buf_size - 1];
 							if (byte == '\n') {
-								TekStk_pop(&lexer->string_buf, NULL);
-								if (lexer->string_buf.count) {
-									byte = *TekStk_get_last(&lexer->string_buf);
+								string_buf_size -= 1;
+								if (string_buf_size) {
+									byte = string_buf[string_buf_size - 1];
 									if (byte == '\r') {
-										TekStk_pop(&lexer->string_buf, NULL);
+										string_buf_size -= 1;
 									}
 								}
 							}
@@ -687,7 +629,7 @@ STRING_ERR:
 							code_idx_start = lexer->code_idx;
 							bail(TekErrorKind_lexer_new_line_in_a_single_line_string);
 						}
-						_TekLexer_advance_line(lexer);
+						_TekLexer_advance_line(lexer, file);
 						goto STRING_CONTINUE;
 					} else if (byte == '\\') { // escape codes
 						_TekLexer_advance_column(lexer, 1);
@@ -737,14 +679,16 @@ STRING_ERR:
 					}
 
 					_TekLexer_advance_column(lexer, 1);
-STRING_CONTINUE:
-					*TekStk_push(&lexer->string_buf, NULL) = byte;
+STRING_CONTINUE: {}
 					if (!_TekLexer_has_code(lexer)) { bail(TekErrorKind_lexer_unclosed_string_literal); }
 				}
 
 				//
-				// store the string entry to be deduplicated at the end of the function.
-				_TekLexer_push_str_entry(lexer, string_buf_idx, lexer->string_buf.count - string_buf_idx, tek_false);
+				// deduplicate the string using the compiler's global string table.
+				// this will allow us to only compare an integer to check for string equality.
+				TekValue* value = &token_values[file->token_values_count];
+				file->token_values_count += 1;
+				value->str_id = TekCompiler_strtab_get_or_insert(c, string_buf, string_buf_size);
 				break;
 			};
 			//
@@ -787,8 +731,8 @@ STRING_CONTINUE:
 					while (_TekLexer_has_code(lexer)) {
 						byte = _TekLexer_peek_byte(lexer);
 						if (byte == '\n' || byte == '\r') {
-							if (lexer->tokens_count > 0 && lexer->tokens[lexer->tokens_count - 1] == '\n') {
-								_TekLexer_advance_line(lexer);
+							if (file->tokens_count > 0 && tokens[file->tokens_count - 1] == '\n') {
+								_TekLexer_advance_line(lexer, file);
 							}
 							break;
 						}
@@ -823,7 +767,7 @@ STRING_CONTINUE:
 								nested_count -= 1;
 							}
 						} else if (byte == '\r' || byte == '\n') {
-							_TekLexer_advance_line(lexer);
+							_TekLexer_advance_line(lexer, file);
 							last_byte = byte;
 							continue;
 						}
@@ -891,8 +835,12 @@ STRING_CONTINUE:
 						bail(TekErrorKind_lexer_expected_a_compile_time_token);
 					} else {
 						//
-						// store the string entry to be deduplicated at the end of the function.
-						_TekLexer_push_str_entry(lexer, lexer->code_idx, ident_len, tek_true);
+						// deduplicate the identifier using the compiler's global string table.
+						// this will allow us to only compare an integer to check for string equality.
+						TekValue* value = &token_values[file->token_values_count];
+						file->token_values_count += 1;
+						// - 1 to include the $ symbol
+						value->str_id = TekCompiler_strtab_get_or_insert(c, lexer->code + lexer->code_idx - 1, ident_len);
 						_TekLexer_advance_column(lexer, ident_len);
 					}
 				}
@@ -1050,18 +998,20 @@ STRING_CONTINUE:
 						lexer->code_idx += ident_len;
 						bail(TekErrorKind_lexer_unrecognised_directive);
 					}
-
-					if (token == TekToken_ident)
-						_TekLexer_advance_column(lexer, ident_len);
 				}
 
 				switch (token) {
 					case TekToken_ident:
-					case TekToken_label:
+					case TekToken_label: {
 						//
-						// store the string entry to be deduplicated at the end of the function.
-						_TekLexer_push_str_entry(lexer, ident_start_idx, ident_len, tek_true);
+						// deduplicate the identifier using the compiler's global string table.
+						// this will allow us to only compare an integer to check for string equality.
+						TekValue* value = &token_values[file->token_values_count];
+						file->token_values_count += 1;
+						value->str_id = TekCompiler_strtab_get_or_insert(c, lexer->code + lexer->code_idx, ident_len);
+						_TekLexer_advance_column(lexer, ident_len);
 						break;
+					};
 				}
 				break;
 			};
@@ -1071,61 +1021,39 @@ STRING_CONTINUE:
 			_TekLexer_advance_column(lexer, 1);
 		}
 
-		TekLexer_token_add(lexer, token, code_idx_start, lexer->code_idx, line_start, column_start);
+		TekLexer_token_add(lexer, file, token, code_idx_start, lexer->code_idx, line_start, column_start);
 	}
 
-	TekLexer_token_add(lexer, TekToken_end_of_file, lexer->code_idx, lexer->code_idx, lexer->line, lexer->column);
-
-	//
-	// deduplcate all of the strings using the global string table.
-	// and assign the string identifer to the TekValue the string belongs to.
-	TekSpinMtx_lock(&c->lock.strtab);
-	for (uint32_t i = 0; i < lexer->str_entries.count; i += 1) {
-		TekLexerStrEntry* e = &lexer->str_entries.TekStk_data[i];
-		TekValue* v = TekStk_get(&lexer->token_values, e->token_values_idx);
-		if (e->str_len == 0) {
-			v->str_id = 0;
-		} else {
-			char* str = e->is_ident
-				? &lexer->code[e->code_idx]
-				: TekStk_get(&lexer->string_buf, e->string_buf_idx);
-
-			v->str_id = TekStrTab_get_or_insert(&c->strtab, str, e->str_len);
-		}
-	}
-	TekSpinMtx_unlock(&c->lock.strtab);
-
-	TekLexer_copy_to_file(lexer, file);
+	TekLexer_token_add(lexer, file, TekToken_end_of_file, lexer->code_idx, lexer->code_idx, lexer->line, lexer->column);
 
 	return tek_true;
 BAIL_INCORRECT_CLOSE_BRACKET: {}
-	TekTokenOpenBracket* open_bracket = TekStk_get_last(&lexer->open_brackets);
+	TekTokenOpenBracket* open_bracket = &open_brackets[open_brackets_count - 1];
 	error.kind = TekErrorKind_lexer_invalid_close_bracket;
-	error.args[1].file = file;
+	error.args[1].file_id = file_id;
 	error.args[1].token_idx = open_bracket->token_idx;
 	// fallthrough
 BAIL:
-	error.args[0].file = file;
-	error.args[0].token_idx = lexer->tokens_count;
+	error.args[0].file_id = file_id;
+	error.args[0].token_idx = file->tokens_count;
 
 	// add the token that failed to the tokens stack so the reference
 	// to the error location in error.args[0] will work.
-	TekLexer_token_add(lexer, token, code_idx_start, lexer->code_idx, line_start, column_start);
+	TekLexer_token_add(lexer, file, token, code_idx_start, lexer->code_idx, line_start, column_start);
 
 	//
-	// add the rest of the new line start indices to lexer->line_code_start_indices
+	// add the rest of the new line start indices to line_code_start_indices
 	while (_TekLexer_has_code(lexer)) {
 		char byte = _TekLexer_peek_byte(lexer);
 		if (byte == '\r' || byte == '\n') {
-			_TekLexer_advance_line(lexer);
+			_TekLexer_advance_line(lexer, file);
 		}
 		lexer->code_idx += 1;
 	}
 
-	TekLexer_copy_to_file(lexer, file);
 	// fallthrough
 BAIL_PUSH_ERROR:
-	TekCompiler_error_add(c, &error);
+	*TekCompiler_error_add(c, error.kind) = error;
 	return tek_false;
 }
 
