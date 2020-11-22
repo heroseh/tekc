@@ -62,13 +62,6 @@ typedef uint8_t TekBool;
 		(dst) = (src); \
 		(_tmp); })
 
-typedef void (*TekOnAbortFn)(void* userdata);
-
-struct {
-	TekOnAbortFn fn;
-	void* userdata;
-} tek_abort_handler = {0};
-
 noreturn void _tek_abort(const char* file, int line, const char* func, char* assert_test, char* message_fmt, ...);
 #define tek_abort(message_fmt, ...) \
 	_tek_abort(__FILE__, __LINE__, __func__, NULL, message_fmt, ##__VA_ARGS__);
@@ -97,6 +90,10 @@ noreturn void _tek_abort(const char* file, int line, const char* func, char* ass
 
 
 uint32_t tek_utf8_codepoint_to_utf32(char* utf8_str, int32_t* utf32_out);
+
+#define tek_ensure(expr) if (!(expr)) return 0;
+#define tek_likely(x) __builtin_expect((x),1)
+#define tek_unlikely(x) __builtin_expect((x),0)
 
 //===========================================================================================
 //
@@ -148,6 +145,20 @@ static inline void* tek_ptr_round_down_align(void* ptr, uintptr_t align) {
 #define tek_zero_elmts(ptr, elmts_count) memset(ptr, 0, sizeof(*(ptr)) * (elmts_count))
 #define tek_copy_bytes(dst, src, byte_count) memmove(dst, src, byte_count)
 #define tek_copy_elmts(dst, src, elmts_count) memmove(dst, src, elmts_count * sizeof(*(dst)))
+
+#define tek_rel_idx_u(T, bits, to, from) _tek_rel_idx(to, from, sizeof(T), 0, (1 << bits) - 1, __FILE__, __LINE__, __func__)
+#define tek_rel_idx_s(T, bits, to, from) _tek_rel_idx(to, from, sizeof(T), -(1 << (bits - 1)), (1 << (bits - 1)) - 1, __FILE__, __LINE__, __func__)
+#define tek_rel_idx_u8(T, to, from) _tek_rel_idx(to, from, sizeof(T), 0, UINT8_MAX, __FILE__, __LINE__, __func__)
+#define tek_rel_idx_u16(T, to, from) _tek_rel_idx(to, from, sizeof(T), 0, UINT16_MAX, __FILE__, __LINE__, __func__)
+#define tek_rel_idx_s8(T, to, from) _tek_rel_idx(to, from, sizeof(T), INT8_MIN, INT8_MAX, __FILE__, __LINE__, __func__)
+#define tek_rel_idx_s16(T, to, from) _tek_rel_idx(to, from, sizeof(T), INT16_MIN, INT16_MAX, __FILE__, __LINE__, __func__)
+static inline int64_t _tek_rel_idx(void* to, void* from, uint32_t elmt_size, int64_t min, int64_t max, const char* file, int line, const char* func) {
+	int64_t offset = (to - from) / elmt_size;
+	if (offset < min || offset > max) {
+		_tek_abort(file, line, func, NULL, "cannot create a relative index of '%zd' to fit in the range of '%zd' - '%zd'", offset, min, max);
+	}
+	return offset;
+}
 
 //===========================================================================================
 //

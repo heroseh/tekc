@@ -5,8 +5,10 @@
 #include <errno.h>
 #include <math.h>
 
+#include "gen_syn.c"
 #include "compiler.c"
 #include "lexer.c"
+#include "misc.c"
 #include "util.c"
 
 int main(int argc, char** argv) {

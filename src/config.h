@@ -6,9 +6,11 @@
 
 #define tek_thread_sync_primitive_spin_iterations 128
 
-#define TEK_LEXER_DEBUG_TOKEN 1
-#define tek_lexer_debug_token_path "/tmp/tek_tokens"
+#define TEK_DEBUG_TOKENS 1
+#define TEK_DEBUG_SYNTAX_TREE 1
+#define tek_debug_tokens_path "/tmp/tek_tokens"
 #define tek_lexer_cap_open_brackets 128
+#define tek_debug_syntax_tree_path "/tmp/tek_syntax_tree"
 
 //===========================================================================================
 //

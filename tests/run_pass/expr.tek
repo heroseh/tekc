@@ -40,10 +40,12 @@ expr_unary: proc() {
 	assert(ptr.* == 32367)
 }
 
+/*
 Vec2: struct {
 	x: F32
 	y: F32
 }
+*/
 
 expr_struct: proc() {
 	v: var mut Vec2
@@ -60,7 +62,7 @@ expr_struct: proc() {
 	assert(v.x == 8)
 	assert(v.y == 9)
 
-	v = Vec2(x = 8, y = 9)
+	v = Vec2(x: 8, y: 9)
 	assert(v.x == 8)
 	assert(v.y == 9)
 }

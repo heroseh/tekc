@@ -20,6 +20,12 @@ TekJobId _TekCompiler_job_list_take(TekCompiler* c, TekJobList* list) {
 		// take from the list head by setting the next job as the head job
 		TekJob* head = _TekCompiler_job_get(c, head_id);
 		list->head = head->next;
+
+		//
+		// set the tail to null if we have reached the end of the list
+		if (list->tail == head_id) {
+			list->tail = 0;
+		}
 	}
 
 	TekSpinMtx_unlock(&list->mtx);
@@ -130,13 +136,18 @@ void _TekCompiler_job_finish(TekCompiler* c, TekJobId job_id, TekBool success_tr
 		} else {
 			j->counter += 1;
 		}
+
+		// clear the counter
+		job_id &= ~TekJobId_counter_MASK;
+		// now set the new counter value in the identifier
+		job_id |= (j->counter << TekJobId_counter_SHIFT) & TekJobId_counter_MASK;
 		_TekCompiler_job_list_add(c, &c->job_sys.free_list, job_id);
 	} else {
 		//
 		// if this is a critical fail, then stop the compilation.
 		switch (j->type) {
-			case TekJobType_file_lex:
-			case TekJobType_file_parse:
+			case TekJobType_lex_file:
+			case TekJobType_gen_syn_file:
 				TekCompiler_signal_stop(c);
 				return;
 		}
@@ -183,11 +194,13 @@ int _TekWorker_main(void* args) {
 
 		TekBool success = tek_false;
 		switch (type) {
-			case TekJobType_file_lex:
+			case TekJobType_lex_file:
 				success = TekLexer_lex(&w->lexer, c, job->file_id);
 				break;
-			case TekJobType_file_parse:
-			case TekJobType_file_validate:
+			case TekJobType_gen_syn_file:
+				success = TekGenSyn_gen_file(w, job->file_id);
+				break;
+			case TekJobType_gen_sem_file:
 			default:
 				tek_abort("unhandled job type '%u'", type);
 		}
@@ -404,7 +417,7 @@ TekStrEntry TekCompiler_strtab_get_entry(TekCompiler* c, TekStrId str_id) {
 	return atomic_load(&entries[str_id - 1]);
 }
 
-TekFileId TekCompiler_file_create(TekCompiler* c, char* file_path, TekStrId parent_file_path_str_id, TekBool is_lib_root) {
+TekFileId TekCompiler_file_get_or_create(TekCompiler* c, char* file_path, TekFileId parent_file_id) {
 	//
 	// resolve any symlinks and create an absolute path
 	char path[PATH_MAX];
@@ -451,10 +464,11 @@ TekFileId TekCompiler_file_create(TekCompiler* c, char* file_path, TekStrId pare
 		} else {
 			//
 			// found a file with this path so return.
-			if (is_lib_root) {
+			if (parent_file_id == 0) {
+				TekFile* parent_file = TekCompiler_file_get(c, parent_file_id);
 				TekError* e = TekCompiler_error_add(c, TekErrorKind_lib_root_file_is_used_in_another_lib);
 				e->args[0].str_id = path_str_id;
-				e->args[1].str_id = parent_file_path_str_id;
+				e->args[1].str_id = parent_file->path_str_id;
 				TekCompiler_signal_stop(c);
 			}
 			return id;
@@ -485,7 +499,7 @@ TekFileId TekCompiler_file_create(TekCompiler* c, char* file_path, TekStrId pare
 	file->id = file_id;
 	file->path_str_id = path_str_id;
 
-	TekJob* job = TekCompiler_job_queue(c, TekJobType_file_lex);
+	TekJob* job = TekCompiler_job_queue(c, TekJobType_lex_file);
 	job->file_id = file_id;
 	return file_id;
 }
@@ -515,7 +529,7 @@ TekLibId TekCompiler_lib_create(TekCompiler* c, char* root_src_file_path) {
 
 	//
 	// create a file for the library's root source file
-	TekFileId file_id = TekCompiler_file_create(c, root_src_file_path, 0, tek_true);
+	TekFileId file_id = TekCompiler_file_get_or_create(c, root_src_file_path, 0);
 	if (file_id == 0) return 0;
 
 	//
@@ -585,8 +599,8 @@ TekCompilerError TekCompiler_compile_start(TekCompiler* c, uint16_t workers_coun
 	return TekCompilerError_none;
 }
 
-void TekCompiler_debug_lexer_tokens(TekCompiler* c) {
-	char ascii_symbol_buf[2];
+void TekCompiler_debug_tokens(TekCompiler* c) {
+	char token_name[128];
 
 	TekStk(char) output = {0};
 
@@ -604,15 +618,7 @@ void TekCompiler_debug_lexer_tokens(TekCompiler* c) {
 		for (uint32_t j = 0; j < file->tokens_count; j += 1) {
 			TekValue* value = &token_values[value_idx];
 			TekToken token = tokens[j];
-
-			char* token_name = NULL;
-			if (token < TekToken_ident) { // is ascii symbol
-				ascii_symbol_buf[0] = token;
-				ascii_symbol_buf[1] = '\0';
-				token_name = ascii_symbol_buf;
-			} else {
-				token_name = TekToken_strings_non_ascii[token];
-			}
+			TekToken_as_string(token, token_name, sizeof(token_name));
 
 			switch (token) {
 				case TekToken_lit_bool:
@@ -660,7 +666,385 @@ void TekCompiler_debug_lexer_tokens(TekCompiler* c) {
 		}
 	}
 
-	int res = tek_file_write(tek_lexer_debug_token_path, output.TekStk_data, output.count);
+	int res = tek_file_write(tek_debug_tokens_path, output.TekStk_data, output.count);
+	tek_assert(res == 0, "failed to write token file: %s", strerror(res));
+	TekStk_deinit(&output);
+}
+
+static void TekCompiler_debug_indent(TekStk(char)* output, uint32_t indent_level) {
+	static char tabs[] = "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t";
+	TekStk_push_str_fmt(output, "%.*s", indent_level, tabs);
+}
+
+void TekCompiler_debug_syntax_node(TekCompiler* c, TekFile* file, TekStk(char)* output, TekSynNode* node, uint32_t indent_level);
+void TekCompiler_debug_syntax_node_child(TekCompiler* c, TekFile* file, TekStk(char)* output, TekSynNode* node, uint32_t indent_level, char* name, int64_t rel_idx) {
+	TekCompiler_debug_indent(output, indent_level);
+	if (rel_idx) {
+		TekStk_push_str_fmt(output, "%s: {\n", name);
+		TekCompiler_debug_syntax_node(c, file, output, &node[rel_idx], indent_level + 1);
+		TekCompiler_debug_indent(output, indent_level);
+		TekStk_push_str(output, "}\n");
+	} else {
+		TekStk_push_str_fmt(output, "%s: NULL\n", name);
+	}
+}
+
+void TekCompiler_debug_syntax_node(TekCompiler* c, TekFile* file, TekStk(char)* output, TekSynNode* node, uint32_t indent_level) {
+	uint32_t ast_id = node - TekFile_syntax_tree_nodes(file);
+	TekCompiler_debug_indent(output, indent_level);
+	TekStk_push_str_fmt(output, "########## SynNode #%u %s ##########\n", ast_id, TekSynNodeKind_strings[node->kind]);
+
+	char token_name[128];
+	TekToken token = TekFile_tokens(file)[node->token_idx];
+	TekToken_as_string(token, token_name, sizeof(token_name));
+	TekCompiler_debug_indent(output, indent_level);
+	TekStk_push_str_fmt(output, "token: %s\n", token_name);
+
+	switch (node->kind) {
+		case TekSynNodeKind_anon_struct_ident:
+		case TekSynNodeKind_lib_ref:
+		case TekSynNodeKind_lib_extern:
+		case TekSynNodeKind_macro:
+		case TekSynNodeKind_interf:
+		case TekSynNodeKind_alias:
+		case TekSynNodeKind_type_struct:
+		case TekSynNodeKind_struct_field:
+		case TekSynNodeKind_type_enum:
+		case TekSynNodeKind_enum_field:
+		case TekSynNodeKind_expr_compile_time:
+			tek_abort("unimplemented syntax node debugging");
+
+		case TekSynNodeKind_type_implicit:
+		case TekSynNodeKind_stmt_fallthrough:
+		case TekSynNodeKind_expr_match_else:
+		case TekSynNodeKind_expr_root_mod:
+			break;
+
+		case TekSynNodeKind_ident:
+		case TekSynNodeKind_ident_abstract:
+		case TekSynNodeKind_label:
+		case TekSynNodeKind_expr_lit_string:
+		{
+			TekStrEntry entry = TekCompiler_strtab_get_entry(c, node->ident_str_id);
+			char* ident = TekStrEntry_value(entry);
+			uint32_t ident_len = TekStrEntry_len(entry);
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "value: %.*s\n", ident_len, ident);
+			break;
+		};
+
+		case TekSynNodeKind_decl:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "ident", node->decl.ident_rel_idx);
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "item", node->decl.item_rel_idx);
+			break;
+
+		case TekSynNodeKind_mod:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "entries", node->mod.entries_list_head_rel_idx);
+			break;
+
+		case TekSynNodeKind_type_proc:
+		case TekSynNodeKind_proc:
+			if (node->proc.flags & TekProcFlags_noreturn) {
+				TekCompiler_debug_indent(output, indent_level);
+				TekStk_push_str(output, "noreturn: true\n");
+			}
+			if (node->proc.flags & TekProcFlags_intrinsic) {
+				TekCompiler_debug_indent(output, indent_level);
+				TekStk_push_str(output, "intrinsic: true\n");
+			}
+
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "call_conv: %s\n", TekProcCallConv_strings[node->proc.call_conv]);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "params", node->proc.params_list_head_rel_idx);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "return_params", node->proc.return_params_list_head_rel_idx);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "stmt_block", node->proc.stmt_block_rel_idx);
+			break;
+
+		case TekSynNodeKind_proc_param:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "ident", node->proc_param.ident_rel_idx);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "type", node->proc_param.type_rel_idx);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "default_value_expr", node->proc_param.default_value_expr_rel_idx);
+			break;
+
+		case TekSynNodeKind_var:
+			if (node->var.flags & TekVarFlags_global) {
+				TekCompiler_debug_indent(output, indent_level);
+				TekStk_push_str_fmt(output, "global: true\n");
+			}
+			if (node->var.flags & TekVarFlags_static) {
+				TekCompiler_debug_indent(output, indent_level);
+				TekStk_push_str_fmt(output, "static: true\n");
+			}
+			if (node->var.flags & TekVarFlags_intrinsic) {
+				TekCompiler_debug_indent(output, indent_level);
+				TekStk_push_str_fmt(output, "intrinsic: true\n");
+			}
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "types", node->var.types_rel_idx);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "init_exprs", node->var.init_exprs_rel_idx);
+			break;
+
+		case TekSynNodeKind_import:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "import", node->import.expr_rel_idx);
+			break;
+
+		case TekSynNodeKind_import_file: {
+			TekFile* target_file = TekCompiler_file_get(c, node->import_file.file_id);
+			char* file_path = TekStrEntry_value(TekCompiler_strtab_get_entry(c, target_file->path_str_id));
+
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "file_path: %s\n", file_path);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "ident", node->import_file.ident_rel_idx);
+			break;
+		};
+
+		case TekSynNodeKind_type_bounded_int:
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "is_signed: %s\n", node->type_bounded_int.is_signed ? "true" : "false");
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "range_expr", node->type_bounded_int.range_expr_rel_idx);
+			break;
+
+		case TekSynNodeKind_type_ptr:
+		case TekSynNodeKind_type_ref:
+		case TekSynNodeKind_type_view:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "rel_type", node->type_ptr.rel_type_rel_idx);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "elmt_type", node->type_ptr.elmt_type_rel_idx);
+			break;
+
+		case TekSynNodeKind_type_array:
+		case TekSynNodeKind_type_stack:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "count", 1);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "elmt_type", node->type_array.elmt_type_rel_idx);
+			break;
+
+		case TekSynNodeKind_type_range:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "elmt_type", 1);
+			break;
+
+		case TekSynNodeKind_type_qualifier:
+			if (node->type_qual.flags & TekTypeQualifierFlags_mut) {
+				TekCompiler_debug_indent(output, indent_level);
+				TekStk_push_str_fmt(output, "mut: true\n");
+			}
+			if (node->type_qual.flags & TekTypeQualifierFlags_noalias) {
+				TekCompiler_debug_indent(output, indent_level);
+				TekStk_push_str_fmt(output, "noalias: true\n");
+			}
+			if (node->type_qual.flags & TekTypeQualifierFlags_volatile) {
+				TekCompiler_debug_indent(output, indent_level);
+				TekStk_push_str_fmt(output, "volatile: true\n");
+			}
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "type", 1);
+			break;
+
+		case TekSynNodeKind_stmt_assign:
+		case TekSynNodeKind_expr_op_binary:
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "binary_op: %s\n", TekBinaryOp_strings[node->binary.op]);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "left", node->binary.left_rel_idx);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "right", node->binary.right_rel_idx);
+			break;
+
+		case TekSynNodeKind_stmt_return: {
+			TekStrEntry entry = TekCompiler_strtab_get_entry(c, node->stmt_return.label_str_id);
+			char* label = TekStrEntry_value(entry);
+			uint32_t label_len = TekStrEntry_len(entry);
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "label: %.*s\n", label_len, label);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "left", node->binary.left_rel_idx);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "right", node->binary.right_rel_idx);
+			break;
+		};
+
+		case TekSynNodeKind_stmt_continue: {
+			TekStrEntry entry = TekCompiler_strtab_get_entry(c, node->stmt_continue.label_str_id);
+			char* label = TekStrEntry_value(entry);
+			uint32_t label_len = TekStrEntry_len(entry);
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "label: %.*s\n", label_len, label);
+			break;
+		};
+
+		case TekSynNodeKind_stmt_goto:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "target", 1);
+			break;
+
+		case TekSynNodeKind_stmt_defer:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "defer", node->stmt_defer.expr_rel_idx);
+			break;
+
+		case TekSynNodeKind_expr_multi:
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "count: %u\n", node->expr_multi.count);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "list", node->expr_multi.list_head_rel_idx);
+			break;
+
+		case TekSynNodeKind_expr_op_unary:
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "unary_op: %s\n", TekUnaryOp_strings[node->unary.op]);
+			break;
+
+		case TekSynNodeKind_expr_if:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "cond", 1);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "success", node->expr_if.success_rel_idx);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "else", node->expr_if.else_rel_idx);
+			break;
+
+		case TekSynNodeKind_expr_match:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "cond", 1);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "cases", node->expr_match.cases_list_head_rel_idx);
+			break;
+
+		case TekSynNodeKind_expr_match_case:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "cond", 1);
+			break;
+
+		case TekSynNodeKind_expr_for:
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "is_by_value: %s\n", node->expr_for.is_by_value ? "true" : "false");
+
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "is_reverse: %s\n", node->expr_for.is_reverse ? "true" : "false");
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "types", node->expr_for.types_list_head_rel_idx);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "iter_expr", node->expr_for.iter_expr_rel_idx);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "stmt_block", node->expr_for.stmt_block_expr_rel_idx);
+			break;
+
+		case TekSynNodeKind_expr_named_arg:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "ident", node->expr_named_arg.ident_rel_idx);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "value", 1);
+			break;
+
+		case TekSynNodeKind_expr_stmt_block:
+		case TekSynNodeKind_expr_loop:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "stmts", node->expr_stmt_block.stmts_list_head_rel_idx);
+			break;
+
+		case TekSynNodeKind_expr_vararg_spread:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "expr", 1);
+			break;
+
+		case TekSynNodeKind_expr_lit_uint:
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "value: %zu\n", TekFile_token_values(file)[node->token_value_idx].uint);
+			break;
+
+		case TekSynNodeKind_expr_lit_sint:
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "value: %zd\n", TekFile_token_values(file)[node->token_value_idx].sint);
+			break;
+
+		case TekSynNodeKind_expr_lit_float:
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "value: %f\n", TekFile_token_values(file)[node->token_value_idx].float_);
+			break;
+
+		case TekSynNodeKind_expr_lit_bool:
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "value: %s\n", TekFile_token_values(file)[node->token_value_idx].bool_ ? "true" : "false");
+			break;
+
+		case TekSynNodeKind_expr_lit_array:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "elmts", 1);
+			break;
+
+		case TekSynNodeKind_expr_up_parent_mods:
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "count: %u\n", node->up_parent_mods_count);
+			break;
+
+		default:
+			tek_abort("unhandled syntax node kind '%s'", TekSynNodeKind_strings[node->kind]);
+	}
+
+	if (node->next_rel_idx) {
+		TekStk_push_str(output, "\n");
+		TekCompiler_debug_syntax_node(c, file, output, &node[node->next_rel_idx], indent_level);
+	}
+}
+
+void TekCompiler_debug_syntax_tree(TekCompiler* c) {
+	char token_name[128];
+
+	TekStk(char) output = {0};
+
+	TekFile* files = TekCompiler_files(c);
+	uint32_t files_count = atomic_load(&c->files_count);
+	for (uint32_t i = 0; i < files_count; i += 1) {
+		TekFile* file = &files[i];
+		TekSynNode* nodes = TekFile_syntax_tree_nodes(file);
+
+		char* path = TekStrEntry_value(TekCompiler_strtab_get_entry(c, file->path_str_id));
+		TekStk_push_str_fmt(&output, "########## FILE: %s ##########\n", path);
+
+		TekCompiler_debug_syntax_node(c, file, &output, nodes, 0);
+	}
+
+	int res = tek_file_write(tek_debug_syntax_tree_path, output.TekStk_data, output.count);
 	tek_assert(res == 0, "failed to write token file: %s", strerror(res));
 	TekStk_deinit(&output);
 }
@@ -672,8 +1056,12 @@ TekCompilerError TekCompiler_compile_wait(TekCompiler* c) {
 	if (TekCompiler_has_errors(c)) {
 		return TekCompilerError_compile_error;
 	} else {
-#if TEK_LEXER_DEBUG_TOKEN
-		TekCompiler_debug_lexer_tokens(c);
+#if TEK_DEBUG_TOKENS
+		TekCompiler_debug_tokens(c);
+#endif
+
+#if TEK_DEBUG_SYNTAX_TREE
+		TekCompiler_debug_syntax_tree(c);
 #endif
 		return TekCompilerError_none;
 	}
@@ -709,6 +1097,27 @@ static char* TekErrorKind_message[TekErrorKind_COUNT] = {
 	[TekErrorKind_lexer_invalid_close_bracket] = "invalid close bracket",
 	[TekErrorKind_lexer_multiline_string_indent_different_char] = "a different character has been used to indent the multiline string",
 	[TekErrorKind_lexer_multiline_string_indent_is_not_enough] = "the indentation does not match the first indentation of the multiline string",
+	[TekErrorKind_gen_syn_mod_must_have_impl] = "a module must have an implementation, use the curly brace '{' after the mod keyword",
+	[TekErrorKind_gen_syn_decl_mod_colon_must_follow_ident] = "a colon ':' must follow the declaration identifier",
+	[TekErrorKind_gen_syn_decl_expected_keyword] = "expected a declaration item keyword like 'mod', 'struct', 'proc', 'enum', 'interf'",
+	[TekErrorKind_gen_syn_entry_expected_to_end_with_a_new_line] = "entry must end with a new line so we can tell where it ends",
+	[TekErrorKind_gen_syn_proc_expected_parentheses] = "parentheses '(' must follow the 'proc' keyword to define some parameters",
+	[TekErrorKind_gen_syn_proc_expected_parentheses_to_follow_arrow] = "parentheses '(' must follow the '->' to define some return parameters",
+	[TekErrorKind_gen_syn_proc_params_cannot_have_vararg_in_return_params] = "we cannot have a vararg in the return parameters",
+	[TekErrorKind_gen_syn_proc_params_unexpected_delimiter] = "expected ',' to declare another parameter or a ')' to finish declaring parameters",
+	[TekErrorKind_gen_syn_type_unexpected_token] = "expected a type",
+	[TekErrorKind_gen_syn_type_bounded_int_expected_pipe_and_bit_count] = "expected a '|' followed by the number of bits to use for this bounded integer",
+	[TekErrorKind_gen_syn_expr_call_expected_close_parentheses] = "expected a parentheses ')' to finish the call expression",
+	[TekErrorKind_gen_syn_type_array_expected_close_bracket] = "expected a bracket ']' to finish the array type",
+	[TekErrorKind_gen_syn_expr_index_expected_close_bracket] = "expected a bracket ']' to finish the index expression",
+	[TekErrorKind_gen_syn_expr_expected_close_parentheses] = "expected a parentheses ')' to finish the expression",
+	[TekErrorKind_gen_syn_expr_loop_expected_curly_brace] = "expected a curly brace '{' to follow the loop keyword",
+	[TekErrorKind_gen_syn_expr_array_expected_close_bracket] = "expected a bracket ']' to finish the array expression",
+	[TekErrorKind_gen_syn_expr_if_else_unexpected_token] = "expected an '{' to declare an else block or a 'if' to declare an else if",
+	[TekErrorKind_gen_syn_expr_match_must_define_cases] = "a match must define its cases, use the curly brace '{' a create a list of cases",
+	[TekErrorKind_gen_syn_expr_match_unexpected_token] = "expected 'case' for a condition, 'else' for the else block, '{' to define a block for a case or '}' to finish the match expression",
+	[TekErrorKind_gen_syn_expr_for_expected_in_keyword] = "expected 'in' keyword to follow the variable declartion of the for loop expression",
+	[TekErrorKind_gen_syn_stmt_only_allow_var_decl] = "inside statement block, we can only have 'var' declartions",
 };
 
 static char* TekErrorKind_double_info_lines[TekErrorKind_COUNT][2] = {
@@ -893,6 +1302,27 @@ void TekCompiler_errors_string(TekCompiler* c, TekStk(char)* string_out, TekBool
 			case TekErrorKind_lexer_unclosed_block_comment:
 			case TekErrorKind_lexer_invalid_string_ascii_esc_char_code_fmt:
 			case TekErrorKind_lexer_invalid_string_esc_sequence:
+			case TekErrorKind_gen_syn_mod_must_have_impl:
+			case TekErrorKind_gen_syn_decl_mod_colon_must_follow_ident:
+			case TekErrorKind_gen_syn_decl_expected_keyword:
+			case TekErrorKind_gen_syn_entry_expected_to_end_with_a_new_line:
+			case TekErrorKind_gen_syn_proc_expected_parentheses:
+			case TekErrorKind_gen_syn_proc_expected_parentheses_to_follow_arrow:
+			case TekErrorKind_gen_syn_proc_params_cannot_have_vararg_in_return_params:
+			case TekErrorKind_gen_syn_proc_params_unexpected_delimiter:
+			case TekErrorKind_gen_syn_type_unexpected_token:
+			case TekErrorKind_gen_syn_type_bounded_int_expected_pipe_and_bit_count:
+			case TekErrorKind_gen_syn_expr_call_expected_close_parentheses:
+			case TekErrorKind_gen_syn_type_array_expected_close_bracket:
+			case TekErrorKind_gen_syn_expr_index_expected_close_bracket:
+			case TekErrorKind_gen_syn_expr_expected_close_parentheses:
+			case TekErrorKind_gen_syn_expr_loop_expected_curly_brace:
+			case TekErrorKind_gen_syn_expr_array_expected_close_bracket:
+			case TekErrorKind_gen_syn_expr_if_else_unexpected_token:
+			case TekErrorKind_gen_syn_expr_match_must_define_cases:
+			case TekErrorKind_gen_syn_expr_match_unexpected_token:
+			case TekErrorKind_gen_syn_expr_for_expected_in_keyword:
+			case TekErrorKind_gen_syn_stmt_only_allow_var_decl:
 				TekCompiler_error_string_single(c, string_out, use_ascii_colors, e);
 				break;
 			case TekErrorKind_lexer_invalid_close_bracket:

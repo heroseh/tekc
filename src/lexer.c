@@ -150,106 +150,14 @@ void TekLexer_token_add(TekLexer* lexer, TekFile* file, TekToken token, uint32_t
 	file->tokens_count += 1;
 }
 
-char* TekToken_strings_non_ascii[] = {
-	[TekToken_ident] = "identifier",
-	[TekToken_ident_abstract] = "abstract identifier",
-	[TekToken_label] = "label",
-    [TekToken_end_of_file] = "end_of_file",
-
-    //
-    // literals
-    //
-    [TekToken_lit_uint] = "literial uint",
-    [TekToken_lit_sint] = "literial sint",
-    [TekToken_lit_float] = "literial float",
-    [TekToken_lit_bool] = "literial bool",
-    [TekToken_lit_string] = "literial string",
-
-	//
-    // grouped symbols
-	//
-    [TekToken_assign_add] = "+=",
-    [TekToken_assign_sub] = "-=",
-    [TekToken_assign_mul] = "*=",
-    [TekToken_assign_div] = "/=",
-    [TekToken_assign_rem] = "%=",
-    [TekToken_assign_bit_and] = "&=",
-    [TekToken_assign_bit_or] = "|=",
-    [TekToken_assign_bit_xor] = "^=",
-    [TekToken_assign_bit_shl] = "<<=",
-    [TekToken_assign_bit_shr] = ">>=",
-    [TekToken_assign_concat] = "++=",
-    [TekToken_concat] = "++",
-    [TekToken_right_arrow] = "->",
-    [TekToken_thick_right_arrow] = "=>",
-    [TekToken_double_equal] = "==",
-    [TekToken_not_equal] = "!=",
-    [TekToken_less_than_or_eq] = "<=",
-    [TekToken_greater_than_or_eq] = ">=",
-    [TekToken_question_and_exclamation_mark] = "?!",
-    [TekToken_double_full_stop] = "..",
-    [TekToken_double_full_stop_equal] = "..=",
-    [TekToken_ellipsis] = "...",
-    [TekToken_double_ampersand] = "&&",
-    [TekToken_double_pipe] = "||",
-	[TekToken_double_less_than] = "<<",
-	[TekToken_double_greater_than] = ">>",
-
-    //
-    // keywords
-    //
-    [TekToken_lib] = "lib",
-    [TekToken_mod] = "mod",
-    [TekToken_proc] = "proc",
-    [TekToken_macro] = "macro",
-    [TekToken_enum] = "enum",
-    [TekToken_struct] = "struct",
-    [TekToken_union] = "union",
-    [TekToken_alias] = "alias",
-    [TekToken_interf] = "interf",
-    [TekToken_var] = "var",
-    [TekToken_mut] = "mut",
-    [TekToken_if] = "if",
-    [TekToken_else] = "else",
-    [TekToken_match] = "match",
-    [TekToken_as] = "as",
-    [TekToken_defer] = "defer",
-    [TekToken_return] = "return",
-    [TekToken_continue] = "continue",
-    [TekToken_goto] = "goto",
-    [TekToken_loop] = "loop",
-    [TekToken_for] = "for",
-    [TekToken_in] = "in",
-
-    //
-    // compile time
-    //
-    [TekToken_compile_time_if] = "$if",
-    [TekToken_compile_time_match] = "$match",
-
-    //
-    // directives
-    //
-    [TekToken_directive_import] = "#import",
-    [TekToken_directive_extern] = "#extern",
-    [TekToken_directive_static] = "#static",
-    [TekToken_directive_abi] = "#abi",
-    [TekToken_directive_call_conv] = "#call_conv",
-    [TekToken_directive_flags] = "#flags",
-    [TekToken_directive_error] = "#error",
-    [TekToken_directive_distinct] = "#distinct",
-    [TekToken_directive_inline] = "#inline",
-    [TekToken_directive_type] = "#type",
-    [TekToken_directive_noalias] = "#noalias",
-    [TekToken_directive_volatile] = "#volatile",
-    [TekToken_directive_noreturn] = "#noreturn",
-    [TekToken_directive_bitfield] = "#bitfield",
-    [TekToken_directive_fallthrough] = "#fallthrough",
-    [TekToken_directive_expr] = "#expr",
-    [TekToken_directive_stmt] = "#stmt",
-	[TekToken_directive_compound_type] = "#compound_type",
-    [TekToken_directive_intrinsic] = "#intrinsic",
-};
+void TekToken_as_string(TekToken token, char* string_out, uint32_t string_out_size) {
+	if (token < TekToken_ident) { // is ascii symbol
+		string_out[0] = token;
+		string_out[1] = '\0';
+	} else {
+		strncpy(string_out, TekToken_strings_non_ascii[token], string_out_size);
+	}
+}
 
 TekBool TekLexer_lex(TekLexer* lexer, TekCompiler* c, TekFileId file_id) {
 	TekTokenOpenBracket open_brackets[tek_lexer_cap_open_brackets] = {0};
@@ -701,7 +609,7 @@ STRING_CONTINUE: {}
 				break;
 			};
 			case '-': {
-				if (_TekLexer_compare_consume_lit(lexer, "-=")) token = TekToken_assign_sub;
+				if (_TekLexer_compare_consume_lit(lexer, "-=")) token = TekToken_assign_subtract;
 				else if (_TekLexer_compare_consume_lit(lexer, "->")) token = TekToken_right_arrow;
 				else if (lexer->code_idx + 1 < lexer->code_len) {
 					uint8_t next_byte = lexer->code[lexer->code_idx + 1];
@@ -715,12 +623,12 @@ STRING_CONTINUE: {}
 				break;
 			};
 			case '*': {
-				if (_TekLexer_compare_consume_lit(lexer, "*=")) token = TekToken_assign_mul;
+				if (_TekLexer_compare_consume_lit(lexer, "*=")) token = TekToken_assign_multiply;
 				break;
 			};
 			case '/': {
 				if (_TekLexer_compare_consume_lit(lexer, "/=")) {
-					token = TekToken_assign_div;
+					token = TekToken_assign_divide;
 				} else if (_TekLexer_compare_consume_lit(lexer, "//")) { // line comment
 					//
 					// skip over every character that comes before the next new line.
@@ -781,7 +689,7 @@ STRING_CONTINUE: {}
 				break;
 			};
 			case '%': {
-				if (_TekLexer_compare_consume_lit(lexer, "%=")) token = TekToken_assign_rem;
+				if (_TekLexer_compare_consume_lit(lexer, "%=")) token = TekToken_assign_remainder;
 				break;
 			};
 			case '!': {
@@ -803,13 +711,13 @@ STRING_CONTINUE: {}
 				break;
 			case '<': {
 				if (_TekLexer_compare_consume_lit(lexer, "<=")) token = TekToken_greater_than_or_eq;
-				else if (_TekLexer_compare_consume_lit(lexer, "<<=")) token = TekToken_assign_bit_shl;
+				else if (_TekLexer_compare_consume_lit(lexer, "<<=")) token = TekToken_assign_bit_shift_left;
 				else if (_TekLexer_compare_consume_lit(lexer, "<<")) token = TekToken_double_greater_than;
 				break;
 			};
 			case '>': {
 				if (_TekLexer_compare_consume_lit(lexer, ">=")) token = TekToken_less_than_or_eq;
-				else if (_TekLexer_compare_consume_lit(lexer, ">>=")) token = TekToken_assign_bit_shr;
+				else if (_TekLexer_compare_consume_lit(lexer, ">>=")) token = TekToken_assign_bit_shift_right;
 				else if (_TekLexer_compare_consume_lit(lexer, ">>")) token = TekToken_double_less_than;
 				break;
 			};
@@ -904,6 +812,8 @@ STRING_CONTINUE: {}
 								token = TekToken_else;
 							} else if (_TekLexer_compare_consume_lit(lexer, "proc")) {
 								token = TekToken_proc;
+							} else if (_TekLexer_compare_consume_lit(lexer, "case")) {
+								token = TekToken_case;
 							} else if (_TekLexer_compare_consume_lit(lexer, "loop")) {
 								token = TekToken_loop;
 							} else if (_TekLexer_compare_consume_lit(lexer, "enum")) {
@@ -1025,6 +935,11 @@ STRING_CONTINUE: {}
 	}
 
 	TekLexer_token_add(lexer, file, TekToken_end_of_file, lexer->code_idx, lexer->code_idx, lexer->line, lexer->column);
+
+	//
+	// success, so now lets queue to job to make a syntax tree.
+	TekJob* j = TekCompiler_job_queue(c, TekJobType_gen_syn_file);
+	j->file_id = file_id;
 
 	return tek_true;
 BAIL_INCORRECT_CLOSE_BRACKET: {}

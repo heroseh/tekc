@@ -21,10 +21,6 @@
 //===========================================================================================
 
 noreturn void _tek_abort(const char* file, int line, const char* func, char* assert_test, char* message_fmt, ...) {
-	if (tek_abort_handler.fn)
-		tek_abort_handler.fn(tek_abort_handler.userdata);
-
-
 	if (assert_test) {
 		fprintf(stderr, "assertion failed: %s\nmessage: ", assert_test);
 	} else {
