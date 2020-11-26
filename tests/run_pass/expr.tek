@@ -1,26 +1,26 @@
 
-expr_binary: proc() {
+expr_binary: proc(one: U32, two: U32) {
 	num: var
 
-	num = 5 + 20
+	num = two + one
 	assert(num == 25)
 
-	num = 20 - 5
+	num = one - two
 	assert(num == 15)
 
-	num = 20 * 5
+	num = one * two
 	assert(num == 100)
 
-	num = 20 / 5
+	num = one / two
 	assert(num == 4)
 
-	num = 20 % 5
+	num = one % two
 	assert(num == 0)
 
-	num = 20 * 5 + 5
+	num = one * two + 5
 	assert(num == 105)
 
-	num = 20 / 4 * 5
+	num = one / 4 * two
 	assert(num == 25)
 }
 
@@ -68,7 +68,7 @@ expr_struct: proc() {
 }
 
 main: proc() {
-	expr_binary()
+	expr_binary(20, 5)
 	expr_unary()
 }
 

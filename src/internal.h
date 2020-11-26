@@ -234,7 +234,8 @@ enum {
 	TekMemSegFile_token_values, // TekValue
 	TekMemSegFile_string_buf, // char
 	TekMemSegFile_line_code_start_indices, // uintptr_t
-	TekMemSegFile_syntax_tree_nodes, // TekAstNode
+	TekMemSegFile_syntax_tree_nodes, // TekSynNode
+	TekMemSegFile_syntax_tree_array_node_indices, // uint32_t
 	TekMemSegFile_COUNT,
 };
 
@@ -245,6 +246,7 @@ static uintptr_t TekMemSegFile_sizes[TekMemSegFile_COUNT] = {
 	[TekMemSegFile_string_buf] = Tek4GB,
 	[TekMemSegFile_line_code_start_indices] = Tek4GB,
 	[TekMemSegFile_syntax_tree_nodes] = Tek4GB,
+	[TekMemSegFile_syntax_tree_array_node_indices] = Tek4GB,
 };
 
 TekVirtMemError tek_mem_segs_reserve(uint8_t memsegs_count, uintptr_t* memsegs_sizes, void** segments_out);
@@ -445,6 +447,7 @@ enum {
 	TekSynNodeKind_mod,
 	TekSynNodeKind_proc,
 	TekSynNodeKind_proc_param,
+	TekSynNodeKind_proc_param_return,
 	TekSynNodeKind_macro,
 	TekSynNodeKind_interf,
 	TekSynNodeKind_var,
@@ -469,6 +472,7 @@ enum {
 	//
 	// statements
 	//
+	TekSynNodeKind_stmt_list_header,
 	TekSynNodeKind_stmt_assign,
 	TekSynNodeKind_stmt_return,
 	TekSynNodeKind_stmt_continue,
@@ -479,6 +483,7 @@ enum {
 	//
 	// expressions
 	//
+	TekSynNodeKind_expr_list_header,
 	TekSynNodeKind_expr_multi,
 	TekSynNodeKind_expr_op_binary,
 	TekSynNodeKind_expr_op_unary,
@@ -503,10 +508,11 @@ enum {
 	TekSynNodeKind_COUNT,
 };
 struct TekSynNode {
-	uint32_t kind: 8; // TekSynNodeKind
-	uint32_t next_rel_idx: 24;
-	uint32_t token_idx;
 	union {
+		struct {
+			uint32_t kind: 7; // TekSynNodeKind
+			int32_t token_idx: 25; // the token index from the parent.
+		} header;
 		struct {
 			int16_t ident_rel_idx;
 			uint16_t item_rel_idx;
@@ -515,33 +521,55 @@ struct TekSynNode {
 			uint16_t entries_list_head_rel_idx;
 		} mod;
 		struct {
-			TekVarFlags flags;
-			uint16_t types_rel_idx;
-			uint16_t init_exprs_rel_idx;
+#define TekSynNode_bits_types_rel_idx 6
+#define TekSynNode_bits_var_init_exprs_rel_idx 23
+			uint32_t is_global: 1;
+			uint32_t is_static: 1;
+			uint32_t is_intrinsic: 1;
+			uint32_t types_rel_idx: TekSynNode_bits_types_rel_idx;
+			uint32_t init_exprs_rel_idx: TekSynNode_bits_var_init_exprs_rel_idx;
 		} var;
 		struct {
 			uint16_t expr_rel_idx;
 		} import;
 		struct {
-			TekFileId file_id;
-			uint16_t ident_rel_idx;
+#define TekSynNode_bits_import_file_file_id 26
+#define TekSynNode_bits_import_file_ident_rel_idx 6
+			uint32_t file_id: TekSynNode_bits_import_file_file_id; // TekFileId
+			uint32_t ident_rel_idx: TekSynNode_bits_import_file_ident_rel_idx;
 		} import_file;
 		struct {
-			TekProcFlags flags;
-			TekProcCallConv call_conv;
-			uint8_t params_list_head_rel_idx;
-			uint16_t return_params_list_head_rel_idx;
-			uint16_t stmt_block_rel_idx;
+#define TekSynNode_bits_proc_call_conv 5
+#define TekSynNode_bits_proc_params_list_head_rel_idx 10
+#define TekSynNode_bits_proc_stmt_block_rel_idx 14
+			uint32_t is_noreturn: 1;
+			uint32_t is_intrinsic: 1;
+			uint32_t is_generic: 1;
+			uint32_t call_conv: TekSynNode_bits_proc_call_conv; // TekProcCallConv
+			uint32_t params_list_head_rel_idx: TekSynNode_bits_proc_params_list_head_rel_idx; // includes return parameters too
+			uint32_t stmt_block_rel_idx: TekSynNode_bits_proc_stmt_block_rel_idx;
+			// the generic params list head node follows this structure directly after in memory
 		} proc;
 		struct {
-			TekBool is_vararg;
-			uint8_t ident_rel_idx;
-			uint16_t type_rel_idx;
-			uint16_t default_value_expr_rel_idx;
+#define TekSynNode_bits_proc_param_ident_rel_idx 6
+#define TekSynNode_bits_proc_param_type_rel_idx 11
+#define TekSynNode_bits_proc_param_default_value_expr_rel_idx 14
+			uint32_t is_vararg: 1;
+			uint32_t ident_rel_idx: TekSynNode_bits_proc_param_ident_rel_idx;
+			uint32_t type_rel_idx: TekSynNode_bits_proc_param_type_rel_idx;
+			uint32_t default_value_expr_rel_idx: TekSynNode_bits_proc_param_default_value_expr_rel_idx;
 		} proc_param;
 		struct {
-			TekTypeQualifierFlags flags;
-			// a type node follows this TekSynNode directly after in memory
+#define TekSynNode_bits_type_qual_flags 3
+#define TekSynNode_bits_type_qual_rel_token_idx 7
+#define TekSynNode_bits_type_qual_type_rel_idx 8
+			uint32_t flags: TekSynNode_bits_type_qual_flags; // TekTypeQualifierFlags
+			uint32_t type_rel_idx: TekSynNode_bits_type_qual_type_rel_idx;
+			//
+			// these are relative from this node.
+			uint32_t rel_token_idx_mut: TekSynNode_bits_type_qual_rel_token_idx;
+			uint32_t rel_token_idx_noalias: TekSynNode_bits_type_qual_rel_token_idx;
+			uint32_t rel_token_idx_volatile: TekSynNode_bits_type_qual_rel_token_idx;
 		} type_qual;
 		struct {
 			uint8_t rel_type_rel_idx;
@@ -549,67 +577,91 @@ struct TekSynNode {
 		} type_ptr;
 		struct {
 			uint16_t elmt_type_rel_idx;
-			// an expression for the array count follows this TekSynNode directly after in memory
+			uint16_t count_expr_rel_idx;
 		} type_array;
 		struct {
-			uint16_t range_expr_rel_idx;
-			TekBool is_signed;
-			// the bit count expression follows this TekSynNode directly after in memory
+#define TekSynNode_bits_type_bounded_int_bit_count_expr_rel_idx 15
+#define TekSynNode_bits_type_bounded_int_range_expr_rel_idx 16
+			uint32_t is_signed: 1;
+			uint32_t bit_count_expr_rel_idx: 15;
+			uint32_t range_expr_rel_idx: 16;
 		} type_bounded_int;
 		struct {
+#define TekSynNode_bits_list_header_next_rel_idx 17
+#define TekSynNode_bits_list_header_item_rel_idx 8
+			uint32_t kind: 7;
+			uint32_t next_rel_idx: TekSynNode_bits_list_header_next_rel_idx;
+			int32_t item_rel_idx: TekSynNode_bits_list_header_item_rel_idx;
+		} list_header;
+		struct {
+			uint16_t count;
 			int16_t list_head_rel_idx;
-			uint32_t count;
 		} expr_multi;
 		struct {
 			int16_t ident_rel_idx;
-			// the value expression follows this TekSynNode directly after in memory
+			uint16_t value_rel_idx;
 		} expr_named_arg;
 		struct {
-			int16_t left_rel_idx;
-			int16_t right_rel_idx;
-			TekBinaryOp op;
+#define TekSynNode_bits_binary_left_rel_idx 13
+#define TekSynNode_bits_binary_right_rel_idx 13
+			uint32_t op: 6; // TekBinaryOp
+			int32_t left_rel_idx: TekSynNode_bits_binary_left_rel_idx;
+			int32_t right_rel_idx: TekSynNode_bits_binary_right_rel_idx;
 		} binary;
 		struct {
 			TekUnaryOp op;
 		} unary;
 		struct {
-			uint16_t success_rel_idx;
-			uint16_t else_rel_idx;
-			// the condition expression follows this TekSynNode directly after in memory
+			uint16_t cond_expr_rel_idx;
+			uint16_t success_expr_rel_idx;
+			// the index to the else expression sits directly after in memory in another TekSynNode.
+			// use TekSynNode.node_idx
 		} expr_if;
 		struct {
+			uint16_t cond_expr_rel_idx;
 			uint16_t cases_list_head_rel_idx;
-			// the condition expression follows this TekSynNode directly after in memory
 		} expr_match;
 		struct {
-			uint16_t types_list_head_rel_idx;
-			uint16_t iter_expr_rel_idx;
-			uint16_t stmt_block_expr_rel_idx;
-			TekBool is_by_value;
-			TekBool is_reverse;
-			// the identifier expressions list head follows this TekSynNode directly after in memory
+#define TekSynNode_bits_expr_for_identifiers_list_head_expr_rel_idx 8
+#define TekSynNode_bits_expr_for_types_list_head_rel_idx 10
+#define TekSynNode_bits_expr_for_iter_expr_rel_idx 12
+			uint32_t is_by_value: 1;
+			uint32_t is_reverse: 1;
+			uint32_t identifiers_list_head_expr_rel_idx: TekSynNode_bits_expr_for_identifiers_list_head_expr_rel_idx;
+			uint32_t types_list_head_rel_idx: TekSynNode_bits_expr_for_types_list_head_rel_idx;
+			uint32_t iter_expr_rel_idx: TekSynNode_bits_expr_for_iter_expr_rel_idx;
+			// the index to the statement block expression sits directly after in memory in another TekSynNode.
+			// use TekSynNode.node_idx
 		} expr_for;
 		struct {
 			uint16_t stmts_list_head_rel_idx;
 		} expr_stmt_block;
 		struct {
-			uint16_t args_expr_rel_idx;
-			TekStrId label_str_id;
-		} stmt_return;
+			uint16_t count;
+			uint16_t sub_expr_rel_idx;
+		} expr_up_parent_mods;
 		struct {
-			TekStrId label_str_id;
-		} stmt_continue;
+#define TekSynNode_bits_stmt_return_args_list_head_expr_rel_idx 12
+			uint32_t has_label: 1;
+			uint32_t args_list_head_expr_rel_idx: TekSynNode_bits_stmt_return_args_list_head_expr_rel_idx;
+			// if (has_label) then the the label node sits directly after in memory in another TekSynNode.
+			// use TekSynNode.label_str_id
+		} stmt_return;
 		struct {
 			uint16_t expr_rel_idx;
 		} stmt_defer;
+		struct {
+			uint16_t expr_rel_idx;
+		} stmt_goto;
 		uint32_t token_value_idx;
-		uint32_t up_parent_mods_count;
 		TekStrId ident_str_id;
+		TekStrId label_str_id;
+		uint32_t next_node_idx;
 	};
 };
 extern char* TekSynNodeKind_strings[TekSynNodeKind_COUNT];
 
-static_assert(sizeof(TekSynNode) == 16, "TekSynNode is meant to be 16 bytes, so we can fit 4 in cacheline");
+static_assert(sizeof(TekSynNode) == 4, "TekSynNode is meant to be 4 bytes, so we can fit 16 in cacheline");
 
 
 //===========================================================================================
@@ -623,6 +675,7 @@ static_assert(sizeof(TekSynNode) == 16, "TekSynNode is meant to be 16 bytes, so 
 typedef struct TekGenSyn TekGenSyn;
 
 struct TekGenSyn {
+	uint32_t* array_node_indices;
 	TekSynNode* nodes;
 	uint32_t nodes_next_idx;
 	const TekToken* tokens;
@@ -632,7 +685,7 @@ struct TekGenSyn {
 	TekFileId file_id;
 };
 
-extern TekSynNode* TekGenSyn_alloc_node(TekWorker* w, TekSynNodeKind kind, uint32_t token_idx);
+extern TekSynNode* TekGenSyn_alloc_node(TekWorker* w, TekSynNodeKind kind, uint32_t token_idx, TekBool header_only);
 extern TekBool TekGenSyn_gen_file(TekWorker* w, TekFileId file_id);
 extern TekSynNode* TekGenSyn_gen_mod(TekWorker* w, uint32_t token_idx, TekBool is_file_root);
 extern TekSynNode* TekGenSyn_gen_var(TekWorker* w, uint32_t token_idx, TekBool is_global);
@@ -640,7 +693,7 @@ extern TekSynNode* TekGenSyn_gen_var_stub(TekWorker* w, uint32_t token_idx, TekB
 extern TekSynNode* TekGenSyn_gen_import(TekWorker* w);
 extern TekSynNode* TekGenSyn_gen_proc(TekWorker* w, uint32_t token_idx);
 extern TekSynNode* TekGenSyn_gen_proc_stub(TekWorker* w, uint32_t token_idx, TekBool is_type);
-extern TekSynNode* TekGenSyn_gen_proc_params(TekWorker* w, TekBool is_return_params);
+extern TekSynNode* TekGenSyn_gen_proc_params(TekWorker* w);
 extern TekSynNode* TekGenSyn_gen_multi_type(TekWorker* w);
 extern TekSynNode* TekGenSyn_gen_type(TekWorker* w, TekBool is_required);
 extern TekSynNode* TekGenSyn_gen_type_ptr(TekWorker* w, TekSynNodeKind kind);
@@ -1150,6 +1203,7 @@ static inline TekValue* TekFile_token_values(TekFile* file) { return file->segme
 static inline char* TekFile_string_buf(TekFile* file) { return file->segments[TekMemSegFile_string_buf]; }
 static inline uintptr_t* TekFile_line_code_start_indices(TekFile* file) { return file->segments[TekMemSegFile_line_code_start_indices]; }
 static inline TekSynNode* TekFile_syntax_tree_nodes(TekFile* file) { return file->segments[TekMemSegFile_syntax_tree_nodes]; }
+static inline uint32_t* TekFile_syntax_tree_array_node_indices(TekFile* file) { return file->segments[TekMemSegFile_syntax_tree_array_node_indices]; }
 
 struct TekLib {
 	void* segments[TekMemSegLib_COUNT];

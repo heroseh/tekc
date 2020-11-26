@@ -1,14 +1,21 @@
 #include "internal.h"
 
-TekSynNode* TekGenSyn_alloc_node(TekWorker* w, TekSynNodeKind kind, uint32_t token_idx) {
+TekSynNode* TekGenSyn_alloc_node_list_header(TekWorker* w) {
 	TekSynNode* node = &w->gen_syn.nodes[w->gen_syn.nodes_next_idx];
 	w->gen_syn.nodes_next_idx += 1;
+	return node;
+}
+
+TekSynNode* TekGenSyn_alloc_node(TekWorker* w, TekSynNodeKind kind, uint32_t token_idx, TekBool header_only) {
+	TekSynNode* node = &w->gen_syn.nodes[w->gen_syn.nodes_next_idx];
+	w->gen_syn.nodes_next_idx += header_only ? 1 : 2;
 
 	//
 	// data is zeroed automatically from the OS when the memory gets committed.
 	// just initialize the fields
-	node->kind = kind;
-	node->token_idx = token_idx;
+	node->header.kind = kind;
+	node->header.token_idx = token_idx;
+
 	return node;
 }
 
@@ -129,7 +136,7 @@ TekBool TekGenSyn_gen_file(TekWorker* w, TekFileId file_id) {
 }
 
 TekSynNode* TekGenSyn_gen_mod(TekWorker* w, uint32_t token_idx, TekBool is_file_root) {
-	TekSynNode* node = TekGenSyn_alloc_node(w, TekSynNodeKind_mod, token_idx);
+	TekSynNode* node = TekGenSyn_alloc_node(w, TekSynNodeKind_mod, token_idx, tek_false);
 	TekToken token = TekGenSyn_token_peek(w);
 
 	if (!is_file_root) {
@@ -162,8 +169,9 @@ TekSynNode* TekGenSyn_gen_mod(TekWorker* w, uint32_t token_idx, TekBool is_file_
 
 				//
 				// allocate a declaration and link the left hand side.
-				entry = TekGenSyn_alloc_node(w, TekSynNodeKind_decl, w->gen_syn.token_idx);
-				entry->decl.ident_rel_idx = tek_rel_idx_s16(TekSynNode, ident, entry);
+				TekGenSyn_alloc_node_list_header(w);
+				entry = TekGenSyn_alloc_node(w, TekSynNodeKind_decl, w->gen_syn.token_idx, tek_false);
+				entry[1].decl.ident_rel_idx = tek_rel_idx_s16(TekSynNode, ident, entry);
 
 				//
 				// process the right hand side (item)
@@ -182,7 +190,7 @@ TekSynNode* TekGenSyn_gen_mod(TekWorker* w, uint32_t token_idx, TekBool is_file_
 				}
 				tek_ensure(item);
 
-				entry->decl.item_rel_idx = tek_rel_idx_u16(TekSynNode, item, entry);
+				entry[1].decl.item_rel_idx = tek_rel_idx_u16(TekSynNode, item, entry);
 			};
 		}
 		tek_ensure(entry);
@@ -190,7 +198,7 @@ TekSynNode* TekGenSyn_gen_mod(TekWorker* w, uint32_t token_idx, TekBool is_file_
 		//
 		// link the entry to the previous entry
 		if (prev_entry) {
-			prev_entry->next_rel_idx = tek_rel_idx_u(TekSynNode, 24, entry, prev_entry);
+			prev_entry[-1].next_node_idx = entry - w->gen_syn.nodes;
 		} else {
 			first_entry = entry;
 		}
@@ -202,7 +210,7 @@ TekSynNode* TekGenSyn_gen_mod(TekWorker* w, uint32_t token_idx, TekBool is_file_
 	}
 END:
 	if (first_entry) {
-		node->mod.entries_list_head_rel_idx = tek_rel_idx_u16(TekSynNode, first_entry, node);
+		node[1].mod.entries_list_head_rel_idx = tek_rel_idx_u16(TekSynNode, first_entry, node);
 	}
 	return node;
 }
@@ -220,14 +228,15 @@ TekSynNode* TekGenSyn_gen_var(TekWorker* w, uint32_t token_idx, TekBool is_globa
 		TekSynNode* init_exprs = TekGenSyn_gen_expr_multi(w, tek_false);
 		tek_ensure(init_exprs);
 
-		node->var.init_exprs_rel_idx = tek_rel_idx_u8(TekSynNode, init_exprs, node);
+		node[1].var.init_exprs_rel_idx = tek_rel_idx_u(
+			TekSynNode, TekSynNode_bits_var_init_exprs_rel_idx, init_exprs, node);
 	}
 
 	return node;
 }
 
 TekSynNode* TekGenSyn_gen_var_stub(TekWorker* w, uint32_t token_idx, TekBool is_global) {
-	TekSynNode* node = TekGenSyn_alloc_node(w, TekSynNodeKind_var, token_idx);
+	TekSynNode* node = TekGenSyn_alloc_node(w, TekSynNodeKind_var, token_idx, tek_false);
 
 	//
 	// generate the types if this is not the end of the var and we do not have an assign symbol.
@@ -236,35 +245,35 @@ TekSynNode* TekGenSyn_gen_var_stub(TekWorker* w, uint32_t token_idx, TekBool is_
 		TekSynNode* types = TekGenSyn_gen_expr_multi(w, tek_false);
 		tek_ensure(types);
 
-		node->var.types_rel_idx = tek_rel_idx_u16(TekSynNode, types, node);
+		node[1].var.types_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_types_rel_idx, types, node);
 		token = TekGenSyn_token_peek(w);
 	}
 
 	//
 	// process the directives
-	TekVarFlags flags = is_global ? TekVarFlags_global : 0;
 	while (1) {
 		switch (token) {
-			case TekToken_directive_static: flags |= TekVarFlags_static; break;
-			case TekToken_directive_intrinsic: flags |= TekVarFlags_intrinsic; break;
+			case TekToken_directive_static: node[1].var.is_static = tek_true; break;
+			case TekToken_directive_intrinsic: node[1].var.is_intrinsic = tek_true; break;
 			default: goto EXIT_FLAGS;
 		}
 		token = TekGenSyn_token_move_next(w);
 	}
 
 EXIT_FLAGS: {}
-	node->var.flags = flags;
+	node[1].var.is_global = is_global;
 	return node;
 }
 
 TekSynNode* TekGenSyn_gen_import(TekWorker* w) {
 	TekToken token = TekGenSyn_token_peek(w);
 
-	TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_import, w->gen_syn.token_idx);
+	TekGenSyn_alloc_node_list_header(w);
+	TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_import, w->gen_syn.token_idx, tek_false);
 	TekSynNode* node = NULL;
 	token = TekGenSyn_token_move_next(w);
 	if (token == TekToken_lit_string) {
-		node = TekGenSyn_alloc_node(w, TekSynNodeKind_import_file, w->gen_syn.token_idx);
+		node = TekGenSyn_alloc_node(w, TekSynNodeKind_import_file, w->gen_syn.token_idx, tek_false);
 
 		//
 		// get the file path from the string table
@@ -276,7 +285,13 @@ TekSynNode* TekGenSyn_gen_import(TekWorker* w) {
 		// if the path is new, then a job is queued to get the file processed.
 		TekFileId file_id = TekCompiler_file_get_or_create(w->c, path, w->gen_syn.file_id);
 		tek_ensure(file_id);
-		node->import_file.file_id = file_id;
+
+		tek_debug_assert(
+			file_id < 1 << TekSynNode_bits_import_file_file_id,
+			"file_id of '%u' exceeds the maximum file_id of '%u' that can be stored in the syntax tree",
+			file_id, (1 << TekSynNode_bits_import_file_file_id) - 1);
+
+		node[1].import_file.file_id = file_id;
 
 		//
 		// if an as keyword follows, then process the identifier that comes after.
@@ -286,7 +301,8 @@ TekSynNode* TekGenSyn_gen_import(TekWorker* w) {
 
 			TekSynNode* ident = TekGenSyn_gen_expr(w);
 			tek_ensure(ident);
-			node->import_file.ident_rel_idx = tek_rel_idx_u16(TekSynNode, ident, node);
+			node[1].import_file.ident_rel_idx = tek_rel_idx_u(
+				TekSynNode, TekSynNode_bits_import_file_ident_rel_idx, ident, node);
 
 			TekGenSyn_token_move_next(w);
 			return stmt;
@@ -320,7 +336,8 @@ TekSynNode* TekGenSyn_gen_proc(TekWorker* w, uint32_t token_idx) {
 	if (token == '{') {
 		TekSynNode* block = TekGenSyn_gen_stmt_block(w);
 		tek_ensure(block);
-		node->proc.stmt_block_rel_idx = tek_rel_idx_u16(TekSynNode, block, node);
+		node[1].proc.stmt_block_rel_idx = tek_rel_idx_u(
+			TekSynNode, TekSynNode_bits_proc_stmt_block_rel_idx, block, node);
 	}
 
 	return node;
@@ -329,84 +346,69 @@ TekSynNode* TekGenSyn_gen_proc(TekWorker* w, uint32_t token_idx) {
 TekSynNode* TekGenSyn_gen_proc_stub(TekWorker* w, uint32_t token_idx, TekBool is_type) {
 	TekToken token = TekGenSyn_token_peek(w);
 
-	TekSynNode* node = TekGenSyn_alloc_node(w, is_type ? TekSynNodeKind_type_proc : TekSynNodeKind_proc, token_idx);
+	TekSynNode* node = TekGenSyn_alloc_node(w, is_type ? TekSynNodeKind_type_proc : TekSynNodeKind_proc, token_idx, tek_false);
 
 	TekGenSyn_skip_new_lines(w, token);
-
 	TekGenSyn_ensure_token(w, token, '(', TekErrorKind_gen_syn_proc_expected_parentheses);
 	{
 		//
 		// generate the parameters
-		TekSynNode* params_list_head = TekGenSyn_gen_proc_params(w, tek_false);
+		TekSynNode* params_list_head = TekGenSyn_gen_proc_params(w);
 		tek_ensure(params_list_head);
 
 		//
 		// store them in the procedure node if we have any
 		if (params_list_head != (TekSynNode*)0x1) {
-			node->proc.params_list_head_rel_idx = tek_rel_idx_u8(TekSynNode, params_list_head, node);
+			node[1].proc.params_list_head_rel_idx = tek_rel_idx_u(
+				TekSynNode, TekSynNode_bits_proc_params_list_head_rel_idx, params_list_head, node);
 		}
 
 		token = TekGenSyn_token_peek(w);
 	}
-	TekGenSyn_skip_new_lines(w, token);
-
-	if (token == TekToken_right_arrow) {
-		//
-		// we have return parameters
-		token = TekGenSyn_token_move_next(w);
-		TekGenSyn_ensure_token(w, token, '(', TekErrorKind_gen_syn_proc_expected_parentheses_to_follow_arrow);
-
-		//
-		// generate the return parameters
-		TekSynNode* return_params_list_head = TekGenSyn_gen_proc_params(w, tek_true);
-		tek_ensure(return_params_list_head);
-
-		//
-		// store them in the procedure node if we have any
-		if (return_params_list_head != (TekSynNode*)0x1) {
-			node->proc.return_params_list_head_rel_idx = tek_rel_idx_u8(TekSynNode, return_params_list_head, node);
-		}
-
-		token = TekGenSyn_token_peek(w);
-	}
-	TekGenSyn_skip_new_lines(w, token);
 
 	TekProcCallConv call_conv = TekProcCallConv_tek;
 	//
 	// TODO: add the ability to set the calling convention of a procedure
 
-	TekProcFlags flags = 0;
 	while (1) {
 		switch (token) {
-			case TekToken_directive_noreturn: flags |= TekProcFlags_noreturn; break;
-			case TekToken_directive_intrinsic: flags |= TekProcFlags_intrinsic; break;
+			case TekToken_directive_noreturn: node[1].proc.is_noreturn = tek_true; break;
+			case TekToken_directive_intrinsic: node[1].proc.is_intrinsic = tek_true; break;
 			default: goto EXIT_FLAGS;
 		}
 		token = TekGenSyn_token_move_next(w);
 	}
 EXIT_FLAGS: {}
-	node->proc.flags = flags;
-	node->proc.call_conv = call_conv;
+	tek_debug_assert(
+		call_conv < 1 << TekSynNode_bits_proc_call_conv,
+		"call_conv of '%u' exceeds the maximum call_conv of '%u' that can be stored in the syntax tree",
+		call_conv, (1 << TekSynNode_bits_proc_call_conv) - 1);
+
+	node[1].proc.call_conv = call_conv;
 	return node;
 }
 
-TekSynNode* TekGenSyn_gen_proc_params(TekWorker* w, TekBool is_return_params) {
+TekSynNode* TekGenSyn_gen_proc_params(TekWorker* w) {
 	TekSynNode* first_param = NULL;
 	TekSynNode* prev_param = NULL;
 
+	TekBool is_return_params = tek_false;
 	TekToken token = TekGenSyn_token_peek(w);
 	TekGenSyn_assert_token(w, token, '(');
+
+PROCESS_START:
 	token = TekGenSyn_token_move_next(w);
 
 	while (token != ')') {
 		TekGenSyn_skip_new_lines(w, token);
 
-		TekSynNode* param = TekGenSyn_alloc_node(w, TekSynNodeKind_proc_param, w->gen_syn.token_idx);
+		TekGenSyn_alloc_node_list_header(w);
+		TekSynNode* param = TekGenSyn_alloc_node(w, is_return_params ? TekSynNodeKind_proc_param_return : TekSynNodeKind_proc_param, w->gen_syn.token_idx, tek_false);
 
 		//
 		// check to see if the parameter allows for variable arguments
 		TekBool is_vararg = token == TekToken_ellipsis;
-		param->proc_param.is_vararg = is_vararg;
+		param[1].proc_param.is_vararg = is_vararg;
 		if (is_vararg) {
 			if (is_return_params) {
 				TekGenSyn_error_token(w, TekErrorKind_gen_syn_proc_params_cannot_have_vararg_in_return_params);
@@ -417,16 +419,21 @@ TekSynNode* TekGenSyn_gen_proc_params(TekWorker* w, TekBool is_return_params) {
 		//
 		// generate the identifier, if we have a colon then process the type
 		TekSynNode* ident = TekGenSyn_gen_expr(w);
+		tek_ensure(ident);
 		TekSynNode* type = NULL;
 		token = TekGenSyn_token_peek(w);
 		if (token == ':') {
+			token = TekGenSyn_token_move_next(w);
 			type = TekGenSyn_gen_type(w, tek_true);
-			param->proc_param.ident_rel_idx = tek_rel_idx_u8(TekSynNode, ident, param);
+			tek_ensure(type);
+			param[1].proc_param.ident_rel_idx = tek_rel_idx_u(
+				TekSynNode, TekSynNode_bits_proc_param_ident_rel_idx, ident, param);
 		} else {
 			// we have no colon so the identifier must be the type
 			type = ident;
 		}
-		param->proc_param.type_rel_idx = tek_rel_idx_u16(TekSynNode, type, param);
+		param[1].proc_param.type_rel_idx = tek_rel_idx_u(
+			TekSynNode, TekSynNode_bits_proc_param_type_rel_idx, type, param);
 
 		//
 		// generate a default value node if we have one
@@ -436,7 +443,8 @@ TekSynNode* TekGenSyn_gen_proc_params(TekWorker* w, TekBool is_return_params) {
 
 			TekSynNode* default_value_expr = TekGenSyn_gen_expr(w);
 			tek_ensure(default_value_expr);
-			param->proc_param.default_value_expr_rel_idx = tek_rel_idx_u8(TekSynNode, default_value_expr, param);
+			param[1].proc_param.default_value_expr_rel_idx = tek_rel_idx_u(
+				TekSynNode, TekSynNode_bits_proc_param_default_value_expr_rel_idx, default_value_expr, param);
 
 			token = TekGenSyn_token_peek(w);
 		}
@@ -444,7 +452,7 @@ TekSynNode* TekGenSyn_gen_proc_params(TekWorker* w, TekBool is_return_params) {
 		//
 		// add this parameter to the link list chain
 		if (prev_param) {
-			prev_param->next_rel_idx = tek_rel_idx_u(TekSynNode, 24, param, prev_param);
+			prev_param[-1].next_node_idx = param - w->gen_syn.nodes;
 		} else {
 			first_param = param;
 		}
@@ -468,30 +476,61 @@ TekSynNode* TekGenSyn_gen_proc_params(TekWorker* w, TekBool is_return_params) {
 
 PARAMS_END:
 	token = TekGenSyn_token_move_next(w);
+
+	//
+	// move to the right arrow if there is only new lines in the way
+	if (token == '\n' && TekGenSyn_token_peek_ahead(w, 1) == TekToken_right_arrow) {
+		token = TekGenSyn_token_move_next(w);
+	}
+
+	if (token == TekToken_right_arrow && !is_return_params) {
+		is_return_params = tek_true;
+		token = TekGenSyn_token_move_next(w);
+		TekGenSyn_skip_new_lines(w, token);
+		TekGenSyn_ensure_token(w, token, '(', TekErrorKind_gen_syn_proc_expected_parentheses_to_follow_arrow);
+		goto PROCESS_START;
+	}
+
 	return first_param ? first_param : (TekSynNode*)0x1;
 }
 
 TekSynNode* TekGenSyn_gen_type(TekWorker* w, TekBool is_required) {
 	TekToken token = TekGenSyn_token_peek(w);
 	TekSynNode* type_qual = NULL;
-	while (1) {
-		switch (token) {
-			case TekToken_mut:
-			case TekToken_directive_noalias:
-			case TekToken_directive_volatile: {
-				type_qual = TekGenSyn_alloc_node(w, TekSynNodeKind_type_qualifier, w->gen_syn.token_idx);
-				switch (token) {
-					case TekToken_mut: type_qual->type_qual.flags = TekTypeQualifierFlags_mut; break;
-					case TekToken_directive_noalias: type_qual->type_qual.flags = TekTypeQualifierFlags_noalias; break;
-					case TekToken_directive_volatile: type_qual->type_qual.flags = TekTypeQualifierFlags_volatile; break;
-					default: goto TYPE_QUAL_END;
-				}
+	switch (token) {
+		case TekToken_mut:
+		case TekToken_directive_noalias:
+		case TekToken_directive_volatile: {
+			uint32_t token_idx = w->gen_syn.token_idx;
+			type_qual = TekGenSyn_alloc_node(w, TekSynNodeKind_type_qualifier, token_idx, tek_false);
 
+			while (1) {
+				uint32_t rel_token_idx = w->gen_syn.token_idx - token_idx;
+				tek_debug_assert(
+					rel_token_idx < 1 << TekSynNode_bits_type_qual_rel_token_idx,
+					"rel_token_idx of '%u' exceeds the maximum rel_token_idx of '%u' that can be stored in the syntax tree",
+					rel_token_idx, (1 << TekSynNode_bits_type_qual_rel_token_idx) - 1);
+
+				switch (token) {
+					case TekToken_mut:
+						type_qual[1].type_qual.flags |= TekTypeQualifierFlags_mut;
+						type_qual[1].type_qual.rel_token_idx_mut = rel_token_idx;
+						break;
+					case TekToken_directive_noalias:
+						type_qual[1].type_qual.flags |= TekTypeQualifierFlags_noalias;
+						type_qual[1].type_qual.rel_token_idx_noalias = rel_token_idx;
+						break;
+					case TekToken_directive_volatile:
+						type_qual[1].type_qual.flags |= TekTypeQualifierFlags_volatile;
+						type_qual[1].type_qual.rel_token_idx_volatile = rel_token_idx;
+						break;
+					default: goto TYPE_QUAL_END;
+				};
 				token = TekGenSyn_token_move_next(w);
-				break;
-			};
-			default: goto TYPE_QUAL_END;
-		}
+			}
+
+			break;
+		};
 	}
 TYPE_QUAL_END: {}
 
@@ -499,9 +538,12 @@ TYPE_QUAL_END: {}
 	TekSynNodeKind kind;
 	switch (token) {
 		case TekToken_double_full_stop: {
-			type = TekGenSyn_alloc_node(w, TekSynNodeKind_type_range, w->gen_syn.token_idx);
+			type = TekGenSyn_alloc_node(w, TekSynNodeKind_type_range, w->gen_syn.token_idx, tek_false);
 			token = TekGenSyn_token_move_next(w);
-			// fallthrough
+
+			TekSynNode* expr = TekGenSyn_gen_expr(w);
+			tek_ensure(expr);
+			type[1].next_node_idx = expr - w->gen_syn.nodes;
 		};
 		case TekToken_ident:
 		case TekToken_ident_abstract:
@@ -533,18 +575,21 @@ PTR:
 				TekGenSyn_error_token(w, TekErrorKind_gen_syn_type_unexpected_token);
 				return NULL;
 			} else {
-				type = TekGenSyn_alloc_node(w, TekSynNodeKind_type_implicit, w->gen_syn.token_idx);
+				type = TekGenSyn_alloc_node(w, TekSynNodeKind_type_implicit, w->gen_syn.token_idx, tek_false);
 			}
 			break;
 	}
 
-	//
-	// if we have one, the type qualifier will come directly before the type.
-	return type_qual ? type_qual : type;
+	if (type_qual) {
+		type_qual[1].type_qual.type_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_type_qual_type_rel_idx, type, type_qual);
+		type = type_qual;
+	}
+
+	return type;
 }
 
 TekSynNode* TekGenSyn_gen_type_ptr(TekWorker* w, TekSynNodeKind kind) {
-	TekSynNode* type = TekGenSyn_alloc_node(w, kind, w->gen_syn.token_idx);
+	TekSynNode* type = TekGenSyn_alloc_node(w, kind, w->gen_syn.token_idx, tek_false);
 
 	TekToken token = TekGenSyn_token_move_next(w);
 
@@ -554,7 +599,7 @@ TekSynNode* TekGenSyn_gen_type_ptr(TekWorker* w, TekSynNodeKind kind) {
 		token = TekGenSyn_token_move_next(w);
 		TekSynNode* rel_type = TekGenSyn_gen_type(w, tek_true);
 		tek_ensure(rel_type);
-		type->type_ptr.rel_type_rel_idx = tek_rel_idx_u8(TekSynNode, rel_type, type);
+		type[1].type_ptr.rel_type_rel_idx = tek_rel_idx_u8(TekSynNode, rel_type, type);
 		token = TekGenSyn_token_peek(w);
 	}
 
@@ -562,7 +607,7 @@ TekSynNode* TekGenSyn_gen_type_ptr(TekWorker* w, TekSynNodeKind kind) {
 	// generate the pointer's element type
 	TekSynNode* elmt_type = TekGenSyn_gen_type(w, tek_true);
 	tek_ensure(elmt_type);
-	type->type_ptr.elmt_type_rel_idx = tek_rel_idx_u8(TekSynNode, elmt_type, type);
+	type[1].type_ptr.elmt_type_rel_idx = tek_rel_idx_u8(TekSynNode, elmt_type, type);
 	return type;
 }
 
@@ -583,10 +628,11 @@ TekSynNode* TekGenSyn_gen_type_array(TekWorker* w) {
 		token = TekGenSyn_token_move_next(w);
 	}
 
-	TekSynNode* type = TekGenSyn_alloc_node(w, kind, w->gen_syn.token_idx);
+	TekSynNode* type = TekGenSyn_alloc_node(w, kind, w->gen_syn.token_idx, tek_false);
 
-	// gen count expression that is known to sit directly after our arr type expression in memory.
-	tek_ensure(TekGenSyn_gen_expr(w));
+	TekSynNode* count_expr = TekGenSyn_gen_expr(w);
+	tek_ensure(count_expr);
+	type[1].type_array.count_expr_rel_idx = tek_rel_idx_u16(TekSynNode, count_expr, type);
 
 	token = TekGenSyn_token_peek(w);
 	TekGenSyn_ensure_token(w, token, ']', TekErrorKind_gen_syn_type_array_expected_close_bracket);
@@ -596,37 +642,37 @@ TekSynNode* TekGenSyn_gen_type_array(TekWorker* w) {
 	// generate the array's element type
 	TekSynNode* elmt_type = TekGenSyn_gen_type(w, tek_true);
 	tek_ensure(elmt_type);
-	type->type_array.elmt_type_rel_idx = tek_rel_idx_u16(TekSynNode, elmt_type, type);
+	type[1].type_array.elmt_type_rel_idx = tek_rel_idx_u16(TekSynNode, elmt_type, type);
 
 	return type;
 }
 
 TekSynNode* TekGenSyn_gen_type_bounded_int(TekWorker* w, TekBool is_signed) {
-	TekSynNode* type = TekGenSyn_alloc_node(w, TekSynNodeKind_type_bounded_int, w->gen_syn.token_idx);
-	type->type_bounded_int.is_signed = is_signed;
+	TekSynNode* type = TekGenSyn_alloc_node(w, TekSynNodeKind_type_bounded_int, w->gen_syn.token_idx, tek_false);
+	type[1].type_bounded_int.is_signed = is_signed;
 
 	TekToken token = TekGenSyn_token_move_next(w);
 	TekGenSyn_ensure_token(w, token, '|', TekErrorKind_gen_syn_type_bounded_int_expected_pipe_and_bit_count);
 	token = TekGenSyn_token_move_next(w);
 
-	// the bit count expression is directly after the type's TekSynNode in memory.
-	// so no need to store this anywhere
-	tek_ensure(TekGenSyn_gen_expr(w));
+	TekSynNode* bit_count_expr = TekGenSyn_gen_expr(w);
+	tek_ensure(bit_count_expr);
+	type[1].type_bounded_int.bit_count_expr_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_type_bounded_int_bit_count_expr_rel_idx, bit_count_expr, type);
 
 	token = TekGenSyn_token_peek(w);
 	if (token == '|') {
 		TekSynNode* range_expr = TekGenSyn_gen_expr(w);
 		tek_ensure(range_expr);
-		type->type_bounded_int.range_expr_rel_idx = tek_rel_idx_u16(TekSynNode, range_expr, type);
+		type[1].type_bounded_int.range_expr_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_type_bounded_int_range_expr_rel_idx, range_expr, type);
 	}
 
 	return type;
 }
 
 TekSynNode* TekGenSyn_gen_expr_multi(TekWorker* w, TekBool process_named_args) {
-	TekSynNode* first_expr = NULL;
-	TekSynNode* prev_expr = NULL;
-	uint32_t count = 0;
+	TekSynNode* first_header = NULL;
+	TekSynNode* prev_header = NULL;
+	uint16_t count = 0;
 	uint32_t token_idx = w->gen_syn.token_idx;
 	while (1) {
 		count += 1;
@@ -641,14 +687,17 @@ TekSynNode* TekGenSyn_gen_expr_multi(TekWorker* w, TekBool process_named_args) {
 			//
 			// we found a colon after the expression, so wrap this in a named argument expression.
 			// put the previously generated expression as the identifier of this named argument.
-			TekSynNode* named_arg_expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_named_arg, w->gen_syn.token_idx);
-			named_arg_expr->expr_named_arg.ident_rel_idx = tek_rel_idx_s16(TekSynNode, expr, named_arg_expr);
+			TekSynNode* named_arg_expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_named_arg, w->gen_syn.token_idx, tek_false);
+			named_arg_expr[1].expr_named_arg.ident_rel_idx = tek_rel_idx_s16(TekSynNode, expr, named_arg_expr);
 
 			//
 			// the value expression follows the named argument expression directly after in memory.
 			// so there is no need to link this in the structure.
 			token = TekGenSyn_token_move_next(w);
-			tek_ensure(TekGenSyn_gen_expr(w));
+			TekSynNode* value_expr = TekGenSyn_gen_expr(w);
+			tek_ensure(value_expr);
+			named_arg_expr[1].expr_named_arg.value_rel_idx = tek_rel_idx_u16(TekSynNode, value_expr, named_arg_expr);
+
 
 			//
 			// make the named argument the expression.
@@ -657,51 +706,40 @@ TekSynNode* TekGenSyn_gen_expr_multi(TekWorker* w, TekBool process_named_args) {
 		}
 
 		//
-		// if done have a comma, then this is the end of the multi expression.
-		// if there is only a single expression, just return that.
+		// if we do not have a comma, then this is the end of the multi expression.
+		// if we do not have a previous header, then just return the expression.
 		if (token != ',') {
-			if (first_expr) {
-				prev_expr->next_rel_idx = tek_rel_idx_u(TekSynNode, 24, expr, prev_expr);
-				break;
-			}
+			if (prev_header) break;
 			else return expr;
 		}
-		TekGenSyn_token_move_next(w);
-		TekGenSyn_skip_new_lines(w, token);
 
 		//
 		// add this expression to the linked list chain
-		if (prev_expr) {
-			prev_expr->next_rel_idx = tek_rel_idx_u(TekSynNode, 24, expr, prev_expr);
-		} else {
-			first_expr = expr;
-		}
-		prev_expr = expr;
+		TekSynNode* header = TekGenSyn_alloc_node_list_header(w);
+		header->list_header.kind = TekSynNodeKind_expr_list_header;
+		header->list_header.item_rel_idx = tek_rel_idx_s(TekSynNode, TekSynNode_bits_list_header_item_rel_idx, expr, header);
+		if (prev_header)
+			prev_header->list_header.next_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_list_header_next_rel_idx, header, prev_header);
+		else
+			first_header = header;
+
+		token = TekGenSyn_token_move_next(w);
+		TekGenSyn_skip_new_lines(w, token);
+
+		prev_header = header;
 	}
 
 	//
 	// create a wrapper node to hold the multiple expression and a count.
-	TekSynNode* multi_expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_multi, token_idx);
-	multi_expr->expr_multi.list_head_rel_idx = tek_rel_idx_s16(TekSynNode, first_expr, multi_expr);
-	multi_expr->expr_multi.count = count;
+	TekSynNode* multi_expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_multi, token_idx, tek_false);
+	multi_expr[1].expr_multi.count = count;
+	multi_expr[1].expr_multi.list_head_rel_idx = tek_rel_idx_s16(TekSynNode, first_header, multi_expr);
 
 	return multi_expr;
 }
 
 TekSynNode* TekGenSyn_gen_expr(TekWorker* w) {
-	TekToken token = TekGenSyn_token_peek(w);
-
-	//
-	// if the expression starts with a full stop.
-	// then this should be an absolute path.
-	// return the expr_root_mod as we can get to the other expression that sit directly after in memory.
-	TekSynNode* expr_root_mod = NULL;
-	if (token == '.') {
-		expr_root_mod = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_root_mod, w->gen_syn.token_idx);
-	}
-
-	TekSynNode* expr = TekGenSyn_gen_expr_with(w, 0);
-	return expr_root_mod ? expr_root_mod : expr;
+	return TekGenSyn_gen_expr_with(w, 0);
 }
 
 TekSynNode* TekGenSyn_gen_expr_with(TekWorker* w, uint8_t min_precedence) {
@@ -752,14 +790,14 @@ TekSynNode* TekGenSyn_gen_expr_with(TekWorker* w, uint8_t min_precedence) {
 		}
 		tek_ensure(right_expr);
 
-		TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_op_binary, binary_op_token_idx);
-		expr->binary.op = binary_op;
-		expr->binary.left_rel_idx = tek_rel_idx_s16(TekSynNode, left_expr, expr);
+		TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_op_binary, binary_op_token_idx, tek_false);
+		expr[1].binary.op = binary_op;
+		expr[1].binary.left_rel_idx = tek_rel_idx_s(TekSynNode, TekSynNode_bits_binary_left_rel_idx, left_expr, expr);
 
 		// call expression might not have any arguments, so check for that
 		// before setting the right hand side.
 		if (right_expr != (TekSynNode*)0x1) {
-			expr->binary.right_rel_idx = tek_rel_idx_s16(TekSynNode, right_expr, expr);
+			expr[1].binary.right_rel_idx = tek_rel_idx_s(TekSynNode, TekSynNode_bits_binary_left_rel_idx, right_expr, expr);
 		}
 
 		//
@@ -778,14 +816,14 @@ TekSynNode* TekGenSyn_gen_expr_unary(TekWorker* w) {
 	switch (token) {
 		case TekToken_ident: kind = TekSynNodeKind_ident; goto IDENT;
 		case TekToken_ident_abstract: kind = TekSynNodeKind_ident_abstract; goto IDENT;
+		case TekToken_label: kind = TekSynNodeKind_label; goto IDENT;
 IDENT:
 		{
-			TekSynNode* expr = TekGenSyn_alloc_node(w, kind, w->gen_syn.token_idx);
-			expr->ident_str_id = TekGenSyn_token_value_take(w)->str_id;
+			TekSynNode* expr = TekGenSyn_alloc_node(w, kind, w->gen_syn.token_idx, tek_false);
+			expr[1].ident_str_id = TekGenSyn_token_value_take(w)->str_id;
 			TekGenSyn_token_move_next(w);
 			return expr;
 		};
-		case TekToken_label: kind = TekSynNodeKind_label; goto VALUE;
 		case TekToken_lit_uint: kind = TekSynNodeKind_expr_lit_uint; goto VALUE;
 		case TekToken_lit_sint: kind = TekSynNodeKind_expr_lit_sint; goto VALUE;
 		case TekToken_lit_float: kind = TekSynNodeKind_expr_lit_float; goto VALUE;
@@ -793,8 +831,8 @@ IDENT:
 		case TekToken_lit_string: kind = TekSynNodeKind_expr_lit_string; goto VALUE;
 VALUE:
 		{
-			TekSynNode* expr = TekGenSyn_alloc_node(w, kind, w->gen_syn.token_idx);
-			expr->token_value_idx = w->gen_syn.token_value_idx;
+			TekSynNode* expr = TekGenSyn_alloc_node(w, kind, w->gen_syn.token_idx, tek_false);
+			expr[1].token_value_idx = w->gen_syn.token_value_idx;
 			w->gen_syn.token_value_idx += 1;
 			TekGenSyn_token_move_next(w);
 			return expr;
@@ -807,12 +845,23 @@ VALUE:
 				up_parent_mods_count += 1;
 			}
 
-			TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_up_parent_mods, token_idx);
-			expr->up_parent_mods_count = up_parent_mods_count;
+			TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_up_parent_mods, token_idx, tek_false);
+			expr[1].expr_up_parent_mods.count = up_parent_mods_count;
 
-			// the child of this up parent mods expression will come directly after in memory.
-			// so there is no need to store it anywhere.
-			tek_ensure(TekGenSyn_gen_expr_unary(w));
+			TekSynNode* sub_expr = TekGenSyn_gen_expr_unary(w);
+			tek_ensure(sub_expr);
+			expr[1].expr_up_parent_mods.sub_expr_rel_idx = tek_rel_idx_u16(TekSynNode, sub_expr, expr);
+
+			return expr;
+		};
+
+		case '.': {
+			TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_root_mod, w->gen_syn.token_idx, tek_false);
+			token = TekGenSyn_token_move_next(w);
+
+			TekSynNode* sub_expr = TekGenSyn_gen_expr_unary(w);
+			tek_ensure(sub_expr);
+			expr[1].next_node_idx = sub_expr - w->gen_syn.nodes;
 
 			return expr;
 		};
@@ -826,8 +875,8 @@ VALUE:
 		case TekToken_question_and_exclamation_mark: unary_op = TekUnaryOp_ensure_null; goto UNARY;
 UNARY:
 		{
-			TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_op_unary, w->gen_syn.token_idx);
-			expr->unary.op = unary_op;
+			TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_op_unary, w->gen_syn.token_idx, tek_false);
+			expr[1].unary.op = unary_op;
 			TekGenSyn_token_move_next(w);
 			return expr;
 		};
@@ -865,12 +914,13 @@ STMT_BLOCK:
 			return TekGenSyn_gen_for_expr(w);
 
 		case '[': {
-			TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_lit_array, w->gen_syn.token_idx);
+			TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_lit_array, w->gen_syn.token_idx, tek_false);
 			TekGenSyn_token_move_next(w);
 
-			// these expressions start directly after our array expression in memory.
-			// so there is not need to store the returned pointer anywhere.
-			tek_ensure(TekGenSyn_gen_expr_multi(w, tek_true));
+			TekSynNode* values_expr = TekGenSyn_gen_expr_multi(w, tek_true);
+			tek_ensure(values_expr);
+
+			expr[1].next_node_idx = values_expr - w->gen_syn.nodes;
 
 			token = TekGenSyn_token_peek(w);
 			TekGenSyn_ensure_token(w, token, ']', TekErrorKind_gen_syn_expr_array_expected_close_bracket);
@@ -881,6 +931,7 @@ STMT_BLOCK:
 		case TekToken_directive_type:
 			TekGenSyn_token_move_next(w);
 			// fallthrough
+		case TekToken_struct:
 		case TekToken_union:
 		case TekToken_proc:
 		case TekToken_mut:
@@ -892,10 +943,12 @@ TYPE_REF:
 			return TekGenSyn_gen_type(w, tek_true);
 
 		case TekToken_ellipsis: {
-			TekSynNode* node = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_vararg_spread, w->gen_syn.token_idx);
-			TekGenSyn_token_move_next(w);
-			tek_ensure(TekGenSyn_gen_expr_unary(w));
-			return node;
+			TekSynNode* node = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_vararg_spread, w->gen_syn.token_idx, tek_false);
+			token = TekGenSyn_token_move_next(w);
+
+			TekSynNode* expr = TekGenSyn_gen_expr_unary(w);
+			tek_ensure(expr);
+			node[1].next_node_idx = expr - w->gen_syn.nodes;
 		};
 	}
 
@@ -908,18 +961,21 @@ TekSynNode* TekGenSyn_gen_expr_if(TekWorker* w) {
 	TekToken token = TekGenSyn_token_peek(w);
 	TekGenSyn_assert_tokens(w, token, TekToken_if, TekToken_compile_time_if);
 
-	TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_if, w->gen_syn.token_idx);
+	TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_if, w->gen_syn.token_idx, tek_false);
+	TekGenSyn_alloc_node_list_header(w); // allocate the node to hold the index to the else block.
 	TekGenSyn_token_move_next(w);
 
 	//
 	// generate condition expression that is known to sit directly after our if expression in memory.
-	tek_ensure(TekGenSyn_gen_expr(w));
+	TekSynNode* cond_expr = TekGenSyn_gen_expr(w);
+	tek_ensure(cond_expr);
+	expr[1].expr_if.cond_expr_rel_idx = tek_rel_idx_u16(TekSynNode, cond_expr, expr);
 
 	//
 	// generate the true block
 	TekSynNode* success_expr = TekGenSyn_gen_stmt_block(w);
 	tek_ensure(success_expr);
-	expr->expr_if.success_rel_idx = tek_rel_idx_u16(TekSynNode, success_expr, expr);
+	expr[1].expr_if.success_expr_rel_idx = tek_rel_idx_u16(TekSynNode, success_expr, expr);
 
 	//
 	// generate the false block if we have an else keyword
@@ -935,7 +991,11 @@ TekSynNode* TekGenSyn_gen_expr_if(TekWorker* w) {
 				return NULL;
 		}
 		tek_ensure(else_expr);
-		expr->expr_if.else_rel_idx = tek_rel_idx_u16(TekSynNode, else_expr, expr);
+
+		//
+		// the else block can be really far off in memory. so we use an extra node
+		// that comes 2 after the header to store the index directly to the else expression
+		expr[2].next_node_idx = else_expr - w->gen_syn.nodes;
 	}
 	return expr;
 }
@@ -944,12 +1004,12 @@ TekSynNode* TekGenSyn_gen_expr_match(TekWorker* w) {
 	TekToken token = TekGenSyn_token_peek(w);
 	TekGenSyn_assert_tokens(w, token, TekToken_match, TekToken_compile_time_match);
 
-	TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_match, w->gen_syn.token_idx);
+	TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_match, w->gen_syn.token_idx, tek_false);
 	token = TekGenSyn_token_move_next(w);
 
-	//
-	// generate condition expression that is known to sit directly after our match expression in memory.
-	tek_ensure(TekGenSyn_gen_expr_multi(w, tek_false));
+	TekSynNode* cond_expr = TekGenSyn_gen_expr_multi(w, tek_false);
+	tek_ensure(cond_expr);
+	expr[1].expr_match.cond_expr_rel_idx = tek_rel_idx_u16(TekSynNode, cond_expr, expr);
 
 	token = TekGenSyn_token_peek(w);
 	TekGenSyn_ensure_token(w, token, '{', TekErrorKind_gen_syn_expr_match_must_define_cases);
@@ -961,19 +1021,29 @@ TekSynNode* TekGenSyn_gen_expr_match(TekWorker* w) {
 		TekGenSyn_skip_new_lines(w, token);
 
 		//
+		// allocate the list header that comes directly before the next node.
+		// WARNING: make sure that all nodes that can be allocated next will
+		// directly follow this in memory.
+		// so the next TekGenSyn_alloc_node to happen must be the one that
+		// gets put in the variable 'case_expr'.
+		TekGenSyn_alloc_node_list_header(w);
+
+		//
 		// we either have a case, else or an statement block for cases.
 		TekSynNode* case_expr = NULL;
 		switch (token) {
 			case TekToken_case:
-				case_expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_match_case, w->gen_syn.token_idx);
+				case_expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_match_case, w->gen_syn.token_idx, tek_false);
 				TekGenSyn_token_move_next(w);
-				// the case condition will follow directly follow the case in memory.
-				// so no need to store it anywhere
-				tek_ensure(TekGenSyn_gen_expr_multi(w, tek_false));
+
+				TekSynNode* sub_expr = TekGenSyn_gen_expr_multi(w, tek_false);
+				tek_ensure(sub_expr);
+
+				case_expr[1].next_node_idx = sub_expr - w->gen_syn.nodes;
 				break;
 
 			case TekToken_else:
-				case_expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_match_else, w->gen_syn.token_idx);
+				case_expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_match_else, w->gen_syn.token_idx, tek_false);
 				break;
 
 			case '{':
@@ -989,7 +1059,7 @@ TekSynNode* TekGenSyn_gen_expr_match(TekWorker* w) {
 		//
 		// add the case to the linked list chain
 		if (prev_case) {
-			prev_case->next_rel_idx = tek_rel_idx_u(TekSynNode, 24, prev_case, case_expr);
+			prev_case[-1].next_node_idx = case_expr - w->gen_syn.nodes;
 		} else {
 			first_case = case_expr;
 		}
@@ -998,20 +1068,20 @@ TekSynNode* TekGenSyn_gen_expr_match(TekWorker* w) {
 
 END:
 	if (first_case)
-		expr->expr_match.cases_list_head_rel_idx = tek_rel_idx_u16(TekSynNode, first_case, expr);
+		expr[1].expr_match.cases_list_head_rel_idx = tek_rel_idx_u16(TekSynNode, first_case, expr);
 
 	TekGenSyn_token_move_next(w);
 	return expr;
 }
 
 TekSynNode* TekGenSyn_gen_for_expr(TekWorker* w) {
-	TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_for, w->gen_syn.token_idx);
+	TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_for, w->gen_syn.token_idx, tek_false);
 	TekToken token = TekGenSyn_token_move_next(w);
 
-	//
-	// generate the identifier expressions that is known to sit directly after our for statement in memory.
-	tek_ensure(TekGenSyn_gen_expr_multi(w, tek_false));
-
+	TekSynNode* identifiers_list_head_expr = TekGenSyn_gen_expr_multi(w, tek_false);
+	tek_ensure(identifiers_list_head_expr);
+	expr[1].expr_for.identifiers_list_head_expr_rel_idx = tek_rel_idx_u(
+		TekSynNode, TekSynNode_bits_expr_for_identifiers_list_head_expr_rel_idx, identifiers_list_head_expr, expr);
 	//
 	// generate the types if we have any that are explicitly defined
 	token = TekGenSyn_token_peek(w);
@@ -1020,7 +1090,7 @@ TekSynNode* TekGenSyn_gen_for_expr(TekWorker* w) {
 
 		TekSynNode* types_list_head = TekGenSyn_gen_expr_multi(w, tek_false);
 		tek_ensure(types_list_head);
-		expr->expr_for.types_list_head_rel_idx = tek_rel_idx_u16(TekSynNode, types_list_head, expr);
+		expr[1].expr_for.types_list_head_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_expr_for_types_list_head_rel_idx, types_list_head, expr);
 
 		token = TekGenSyn_token_peek(w);
 	}
@@ -1057,13 +1127,16 @@ TekSynNode* TekGenSyn_gen_for_expr(TekWorker* w) {
 	// generate the iterator expression
 	TekSynNode* iter_expr = TekGenSyn_gen_expr(w);
 	tek_ensure(iter_expr);
-	expr->expr_for.iter_expr_rel_idx = tek_rel_idx_u16(TekSynNode, iter_expr, expr);
+	expr[1].expr_for.iter_expr_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_expr_for_iter_expr_rel_idx, iter_expr, expr);
 
 	//
 	// generate the statement block
 	TekSynNode* stmt_block_expr = TekGenSyn_gen_stmt_block(w);
 	tek_ensure(stmt_block_expr);
-	expr->expr_for.stmt_block_expr_rel_idx = tek_rel_idx_u16(TekSynNode, stmt_block_expr, expr);
+	//
+	// the statement block can be really far off in memory. so we use an extra node
+	// that comes 2 after the header to store the index directly to the statement block expression
+	expr[2].next_node_idx = stmt_block_expr - w->gen_syn.nodes;
 
 	return expr;
 }
@@ -1073,7 +1146,7 @@ TekSynNode* TekGenSyn_gen_stmt_block(TekWorker* w) {
 }
 
 TekSynNode* TekGenSyn_gen_stmt_block_with(TekWorker* w, TekSynNodeKind kind) {
-	TekSynNode* expr = TekGenSyn_alloc_node(w, kind, w->gen_syn.token_idx);
+	TekSynNode* expr = TekGenSyn_alloc_node(w, kind, w->gen_syn.token_idx, tek_false);
 
 	//
 	// move off the curly brace
@@ -1081,8 +1154,8 @@ TekSynNode* TekGenSyn_gen_stmt_block_with(TekWorker* w, TekSynNodeKind kind) {
 	TekGenSyn_assert_token(w, token, '{');
 	token = TekGenSyn_token_move_next(w);
 
-	TekSynNode* first_stmt = NULL;
-	TekSynNode* prev_stmt = NULL;
+	TekSynNode* first_header = NULL;
+	TekSynNode* prev_header = NULL;
 	while (1) {
 		TekGenSyn_skip_new_lines(w, token);
 		if (token == '}') break;
@@ -1093,18 +1166,24 @@ TekSynNode* TekGenSyn_gen_stmt_block_with(TekWorker* w, TekSynNodeKind kind) {
 		tek_ensure(stmt);
 
 		//
-		// add the statement to the previous statement in the linked list
-		if (prev_stmt) {
-			prev_stmt->next_rel_idx = tek_rel_idx_u(TekSynNode, 24, stmt, prev_stmt);
-		} else {
-			first_stmt = stmt;
-		}
-		prev_stmt = stmt;
+		// create a list header to link to the next statment.
+		TekSynNode* header = TekGenSyn_alloc_node_list_header(w);
+		header->list_header.kind = TekSynNodeKind_stmt_list_header;
+		header->list_header.item_rel_idx = tek_rel_idx_s(TekSynNode, TekSynNode_bits_list_header_item_rel_idx, stmt, header);
+
+		//
+		// add this statement to the linked list chain
+		if (prev_header)
+			prev_header->list_header.next_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_list_header_next_rel_idx, header, prev_header);
+		else
+			first_header = header;
 
 		token = TekGenSyn_token_peek(w);
+
+		prev_header = header;
 	}
 
-	expr->expr_stmt_block.stmts_list_head_rel_idx = tek_rel_idx_u16(TekSynNode, first_stmt, expr);
+	expr[1].expr_stmt_block.stmts_list_head_rel_idx = tek_rel_idx_u16(TekSynNode, first_header, expr);
 	TekGenSyn_token_move_next(w);
 	return expr;
 }
@@ -1113,13 +1192,15 @@ TekSynNode* TekGenSyn_gen_stmt(TekWorker* w) {
 	TekToken token = TekGenSyn_token_peek(w);
 	switch (token) {
 		case TekToken_return: {
-			TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_stmt_return, w->gen_syn.token_idx);
+			TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_stmt_return, w->gen_syn.token_idx, tek_false);
 			token = TekGenSyn_token_move_next(w);
 
 			//
 			// store the label if we have one
 			if (token == TekToken_label) {
-				stmt->stmt_return.label_str_id = TekGenSyn_token_value_take(w)->str_id;
+				stmt[1].stmt_return.has_label = tek_true;
+				TekSynNode* node = TekGenSyn_alloc_node_list_header(w); // allocate an extra node that directly follows the return statement to hold the label
+				node->label_str_id = TekGenSyn_token_value_take(w)->str_id;
 				token = TekGenSyn_token_move_next(w);
 			}
 
@@ -1129,26 +1210,26 @@ TekSynNode* TekGenSyn_gen_stmt(TekWorker* w) {
 				TekSynNode* args_expr = TekGenSyn_gen_expr_multi(w, tek_true);
 				tek_ensure(args_expr);
 				if (args_expr != (TekSynNode*)0x1) {
-					stmt->stmt_return.args_expr_rel_idx = tek_rel_idx_u16(TekSynNode, args_expr, stmt);
+					stmt[1].stmt_return.args_list_head_expr_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_stmt_return_args_list_head_expr_rel_idx, args_expr, stmt);
 				}
 			}
 			return stmt;
 		};
 		case TekToken_continue: {
-			TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_stmt_continue, w->gen_syn.token_idx);
+			TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_stmt_continue, w->gen_syn.token_idx, tek_false);
 			token = TekGenSyn_token_move_next(w);
 
 			//
 			// store the label if we have one
 			if (token == TekToken_label) {
-				stmt->stmt_continue.label_str_id = TekGenSyn_token_value_take(w)->str_id;
+				stmt[1].label_str_id = TekGenSyn_token_value_take(w)->str_id;
 				TekGenSyn_token_move_next(w);
 			}
 
 			return stmt;
 		};
 		case TekToken_defer: {
-			TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_stmt_defer, w->gen_syn.token_idx);
+			TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_stmt_defer, w->gen_syn.token_idx, tek_false);
 			token = TekGenSyn_token_move_next(w);
 
 			//
@@ -1158,19 +1239,21 @@ TekSynNode* TekGenSyn_gen_stmt(TekWorker* w) {
 				: TekGenSyn_gen_expr(w);
 			tek_ensure(expr);
 
-			stmt->stmt_defer.expr_rel_idx = tek_rel_idx_u16(TekSynNode, expr, stmt);
+			stmt[1].stmt_defer.expr_rel_idx = tek_rel_idx_u16(TekSynNode, expr, stmt);
 			return stmt;
 		};
 		case TekToken_goto: {
-			TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_stmt_goto, w->gen_syn.token_idx);
+			TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_stmt_goto, w->gen_syn.token_idx, tek_false);
 			TekGenSyn_token_move_next(w);
 
-			// generate the expression that is known to sit directly after our goto statement in memory.
-			tek_ensure(TekGenSyn_gen_expr(w));
+			TekSynNode* expr = TekGenSyn_gen_expr(w);
+			tek_ensure(expr);
+
+			stmt[1].stmt_goto.expr_rel_idx = tek_rel_idx_u16(TekSynNode, expr, stmt);
 			return stmt;
 		};
 		case TekToken_directive_fallthrough: {
-			TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_stmt_fallthrough, w->gen_syn.token_idx);
+			TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_stmt_fallthrough, w->gen_syn.token_idx, tek_true);
 			TekGenSyn_token_move_next(w);
 			return stmt;
 		};
@@ -1188,11 +1271,11 @@ TekSynNode* TekGenSyn_gen_stmt(TekWorker* w) {
 	TekBinaryOp binary_op = TekBinaryOp_none;
 	switch (token) {
 		case ':': {
-			TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_decl, w->gen_syn.token_idx);
+			TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_decl, w->gen_syn.token_idx, tek_false);
 
 			//
 			// the expression we just generated is used as the identifier for this declaration
-			stmt->decl.ident_rel_idx = tek_rel_idx_s16(TekSynNode, expr, stmt);
+			stmt[1].decl.ident_rel_idx = tek_rel_idx_s16(TekSynNode, expr, stmt);
 
 			//
 			// we only allow variable declarations in statement block scopes
@@ -1206,7 +1289,7 @@ TekSynNode* TekGenSyn_gen_stmt(TekWorker* w) {
 			// generate the variable
 			TekSynNode* item = TekGenSyn_gen_var(w, token_idx, tek_false);
 			tek_ensure(item);
-			stmt->decl.item_rel_idx = tek_rel_idx_u16(TekSynNode, item, stmt);
+			stmt[1].decl.item_rel_idx = tek_rel_idx_u16(TekSynNode, item, stmt);
 
 			return stmt;
 		};
@@ -1248,13 +1331,13 @@ BINARY_OP:
 		{
 			//
 			// we have a assign statement here
-			TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_stmt_assign, w->gen_syn.token_idx);
-			stmt->binary.op = binary_op;
+			TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_stmt_assign, w->gen_syn.token_idx, tek_false);
+			stmt[1].binary.op = binary_op;
 
 			//
 			// link the left hand side expression we generated before this.
 			// this is the assignee
-			stmt->binary.left_rel_idx = tek_rel_idx_s16(TekSynNode, expr, stmt);
+			stmt[1].binary.left_rel_idx = tek_rel_idx_s(TekSynNode, TekSynNode_bits_binary_left_rel_idx, expr, stmt);
 			token = TekGenSyn_token_move_next(w);
 
 			//
@@ -1262,7 +1345,7 @@ BINARY_OP:
 			// this is the value being assigned
 			TekSynNode* right_expr = TekGenSyn_gen_expr_multi(w, tek_false);
 			tek_ensure(right_expr);
-			stmt->binary.right_rel_idx = tek_rel_idx_s16(TekSynNode, right_expr, stmt);
+			stmt[1].binary.right_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_binary_right_rel_idx, right_expr, stmt);
 
 			return stmt;
 		};
