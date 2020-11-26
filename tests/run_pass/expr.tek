@@ -40,12 +40,10 @@ expr_unary: proc() {
 	assert(ptr.* == 32367)
 }
 
-/*
 Vec2: struct {
 	x: F32
 	y: F32
 }
-*/
 
 expr_struct: proc() {
 	v: var mut Vec2

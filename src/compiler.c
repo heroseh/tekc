@@ -715,6 +715,8 @@ void TekCompiler_debug_syntax_node_child_has_list_header(TekCompiler* c, TekFile
 			TekStk_push_str_fmt(output, "#SynNode #%u list_header\n", idx - 1);
 			TekCompiler_debug_syntax_node(c, file, output, node, indent_level + 1);
 			idx = node[-1].next_node_idx;
+			if (idx)
+				TekStk_push_str(output, "\n");
 		}
 		TekCompiler_debug_indent(output, indent_level);
 		TekStk_push_str(output, "}\n");
@@ -755,8 +757,6 @@ NEXT_NODE: {}
 		case TekSynNodeKind_macro:
 		case TekSynNodeKind_interf:
 		case TekSynNodeKind_alias:
-		case TekSynNodeKind_type_struct:
-		case TekSynNodeKind_struct_field:
 		case TekSynNodeKind_type_enum:
 		case TekSynNodeKind_enum_field:
 		case TekSynNodeKind_expr_compile_time:
@@ -797,7 +797,7 @@ NEXT_NODE: {}
 		case TekSynNodeKind_proc:
 			if (node[1].proc.is_generic) {
 				TekCompiler_debug_indent(output, indent_level);
-				TekStk_push_str(output, "noreturn: true\n");
+				TekStk_push_str(output, "generic: true\n");
 			}
 			if (node[1].proc.is_noreturn) {
 				TekCompiler_debug_indent(output, indent_level);
@@ -871,6 +871,27 @@ NEXT_NODE: {}
 				c, file, output, node, indent_level, "ident", node[1].import_file.ident_rel_idx);
 			break;
 		};
+
+		case TekSynNodeKind_type_struct:
+			if (node[1].proc.is_generic) {
+				TekCompiler_debug_indent(output, indent_level);
+				TekStk_push_str(output, "generic: true\n");
+			}
+
+			TekCompiler_debug_indent(output, indent_level);
+			TekStk_push_str_fmt(output, "abi: %s\n", TekProcCallConv_strings[node[1].type_struct.abi]);
+
+			TekCompiler_debug_syntax_node_child_has_list_header(
+				c, file, output, node, indent_level, "fields", node[1].type_struct.fields_list_head_rel_idx);
+			break;
+
+		case TekSynNodeKind_struct_field:
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "ident", node[1].struct_field.ident_rel_idx);
+
+			TekCompiler_debug_syntax_node_child(
+				c, file, output, node, indent_level, "type", node[1].struct_field.type_rel_idx);
+			break;
 
 		case TekSynNodeKind_type_bounded_int:
 			TekCompiler_debug_indent(output, indent_level);

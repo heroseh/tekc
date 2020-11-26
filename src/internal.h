@@ -123,6 +123,7 @@ enum {
 	TekTypeQualifierFlags_mut = 0x1,
 	TekTypeQualifierFlags_noalias = 0x2,
 	TekTypeQualifierFlags_volatile = 0x4,
+	TekTypeQualifierFlags_all = 0x7,
 };
 
 typedef uint8_t TekVarFlags;
@@ -133,6 +134,14 @@ enum {
 	TekVarFlags_intrinsic = 0x8,
 	TekVarFlags_vararg = 0x10,
 };
+
+typedef uint8_t TekAbi;
+enum {
+	TekAbi_tek,
+	TekAbi_c,
+	TekAbi_COUNT,
+};
+extern char* TekAbi_strings[TekProcCallConv_COUNT];
 
 //===========================================================================================
 //
@@ -521,14 +530,27 @@ struct TekSynNode {
 			uint16_t entries_list_head_rel_idx;
 		} mod;
 		struct {
-#define TekSynNode_bits_types_rel_idx 6
+#define TekSynNode_bits_var_types_rel_idx 6
 #define TekSynNode_bits_var_init_exprs_rel_idx 23
 			uint32_t is_global: 1;
 			uint32_t is_static: 1;
 			uint32_t is_intrinsic: 1;
-			uint32_t types_rel_idx: TekSynNode_bits_types_rel_idx;
+			uint32_t types_rel_idx: TekSynNode_bits_var_types_rel_idx;
 			uint32_t init_exprs_rel_idx: TekSynNode_bits_var_init_exprs_rel_idx;
 		} var;
+		struct {
+#define TekSynNode_bits_type_struct_abi 3
+#define TekSynNode_bits_type_struct_fields_list_head_rel_idx 28
+			uint32_t is_generic: 1;
+			uint32_t abi: TekSynNode_bits_type_struct_abi;
+			uint32_t fields_list_head_rel_idx: TekSynNode_bits_type_struct_fields_list_head_rel_idx;
+		} type_struct;
+		struct {
+#define TekSynNode_bits_struct_field_ident_rel_idx 16
+#define TekSynNode_bits_struct_field_type_rel_idx 16
+			int32_t ident_rel_idx: TekSynNode_bits_struct_field_ident_rel_idx;
+			uint32_t type_rel_idx: TekSynNode_bits_struct_field_type_rel_idx;
+		} struct_field;
 		struct {
 			uint16_t expr_rel_idx;
 		} import;
@@ -563,6 +585,7 @@ struct TekSynNode {
 #define TekSynNode_bits_type_qual_flags 3
 #define TekSynNode_bits_type_qual_rel_token_idx 7
 #define TekSynNode_bits_type_qual_type_rel_idx 8
+static_assert((1 << TekSynNode_bits_type_qual_flags) - 1 == TekTypeQualifierFlags_all, "the field in the syntax tree that holds the TekTypeQualifierFlags is not big enough to hold them.");
 			uint32_t flags: TekSynNode_bits_type_qual_flags; // TekTypeQualifierFlags
 			uint32_t type_rel_idx: TekSynNode_bits_type_qual_type_rel_idx;
 			//
@@ -691,6 +714,8 @@ extern TekSynNode* TekGenSyn_gen_mod(TekWorker* w, uint32_t token_idx, TekBool i
 extern TekSynNode* TekGenSyn_gen_var(TekWorker* w, uint32_t token_idx, TekBool is_global);
 extern TekSynNode* TekGenSyn_gen_var_stub(TekWorker* w, uint32_t token_idx, TekBool is_global);
 extern TekSynNode* TekGenSyn_gen_import(TekWorker* w);
+extern TekSynNode* TekGenSyn_gen_type_struct(TekWorker* w, uint32_t token_idx);
+extern TekSynNode* TekGenSyn_gen_type_struct_stub(TekWorker* w, uint32_t token_idx);
 extern TekSynNode* TekGenSyn_gen_proc(TekWorker* w, uint32_t token_idx);
 extern TekSynNode* TekGenSyn_gen_proc_stub(TekWorker* w, uint32_t token_idx, TekBool is_type);
 extern TekSynNode* TekGenSyn_gen_proc_params(TekWorker* w);
@@ -1115,6 +1140,7 @@ enum {
 	TekErrorKind_gen_syn_decl_mod_colon_must_follow_ident,
 	TekErrorKind_gen_syn_decl_expected_keyword,
 	TekErrorKind_gen_syn_entry_expected_to_end_with_a_new_line,
+	TekErrorKind_gen_syn_type_struct_field_colon_must_follow_ident,
 	TekErrorKind_gen_syn_proc_expected_parentheses,
 	TekErrorKind_gen_syn_proc_expected_parentheses_to_follow_arrow,
 	TekErrorKind_gen_syn_proc_params_cannot_have_vararg_in_return_params,

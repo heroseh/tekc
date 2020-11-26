@@ -182,6 +182,7 @@ TekSynNode* TekGenSyn_gen_mod(TekWorker* w, uint32_t token_idx, TekBool is_file_
 				switch (token) {
 					case TekToken_mod: item = TekGenSyn_gen_mod(w, item_token_idx, tek_false); break;
 					case TekToken_proc: item = TekGenSyn_gen_proc(w, item_token_idx); break;
+					case TekToken_struct: item = TekGenSyn_gen_type_struct(w, item_token_idx); break;
 					case TekToken_var: item = TekGenSyn_gen_var(w, item_token_idx, tek_true); break;
 					default:
 						w->gen_syn.token_idx = item_token_idx;
@@ -245,7 +246,7 @@ TekSynNode* TekGenSyn_gen_var_stub(TekWorker* w, uint32_t token_idx, TekBool is_
 		TekSynNode* types = TekGenSyn_gen_expr_multi(w, tek_false);
 		tek_ensure(types);
 
-		node[1].var.types_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_types_rel_idx, types, node);
+		node[1].var.types_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_var_types_rel_idx, types, node);
 		token = TekGenSyn_token_peek(w);
 	}
 
@@ -318,6 +319,92 @@ TekSynNode* TekGenSyn_gen_import(TekWorker* w) {
 	stmt->import.expr_rel_idx = tek_rel_idx_u16(TekSynNode, node, stmt);
 
 	return stmt;
+}
+
+TekSynNode* TekGenSyn_gen_type_struct(TekWorker* w, uint32_t token_idx) {
+	TekSynNode* node = TekGenSyn_gen_type_struct_stub(w, token_idx);
+	tek_ensure(node);
+
+	//
+	// move to the open curly brace if there is only new lines in the way
+	TekToken token = TekGenSyn_token_peek(w);
+	if (token == '\n' && TekGenSyn_token_peek_ahead(w, 1) == '{') {
+		token = TekGenSyn_token_move_next(w);
+	}
+
+	//
+	// generate the fields if we have an open curly brace
+	if (token == '{') {
+		token = TekGenSyn_token_move_next(w);
+		TekGenSyn_skip_new_lines(w, token);
+		TekSynNode* first_field = NULL;
+		TekSynNode* prev_field = NULL;
+		while (token != '}') {
+			TekSynNode* field = NULL;
+
+			//
+			// lets process the left hand side (identifier) first
+			TekSynNode* ident = TekGenSyn_gen_expr(w);
+			tek_ensure(ident);
+
+			//
+			// we must have a colon follow the left hand side.
+			token = TekGenSyn_token_peek(w);
+			TekGenSyn_ensure_token(w, token, ':', TekErrorKind_gen_syn_type_struct_field_colon_must_follow_ident);
+
+			//
+			// allocate a declaration and link the left hand side.
+			TekGenSyn_alloc_node_list_header(w);
+			field = TekGenSyn_alloc_node(w, TekSynNodeKind_struct_field, w->gen_syn.token_idx, tek_false);
+			field[1].struct_field.ident_rel_idx = tek_rel_idx_s(TekSynNode, TekSynNode_bits_struct_field_ident_rel_idx, ident, field);
+
+			//
+			// process the right hand side (the type)
+			token = TekGenSyn_token_move_next(w);
+
+			TekSynNode* type = TekGenSyn_gen_type(w, tek_true);
+			tek_ensure(type);
+			field[1].struct_field.type_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_struct_field_type_rel_idx, type, field);
+
+			//
+			// link the field to the previous field
+			if (prev_field) {
+				prev_field[-1].next_node_idx = field - w->gen_syn.nodes;
+			} else {
+				first_field = field;
+			}
+			prev_field = field;
+
+			token = TekGenSyn_token_peek(w);
+			TekGenSyn_ensure_token(w, token, '\n', TekErrorKind_gen_syn_entry_expected_to_end_with_a_new_line);
+			token = TekGenSyn_token_move_next(w);
+		}
+		token = TekGenSyn_token_move_next(w);
+		if (first_field) {
+			node[1].type_struct.fields_list_head_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_type_struct_fields_list_head_rel_idx, first_field, node);
+		}
+	}
+
+	return node;
+}
+
+TekSynNode* TekGenSyn_gen_type_struct_stub(TekWorker* w, uint32_t token_idx) {
+	TekSynNode* node = TekGenSyn_alloc_node(w, TekSynNodeKind_type_struct, token_idx, tek_false);
+
+	TekToken token = TekGenSyn_token_peek(w);
+	TekAbi abi = TekAbi_tek;
+
+	//
+	// TODO generate the ABI
+	//
+
+	tek_debug_assert(
+		abi < 1 << TekSynNode_bits_type_struct_abi,
+		"abi of '%u' exceeds the maximum value of '%u' that can be stored in the syntax tree",
+		abi, (1 << TekSynNode_bits_type_struct_abi) - 1);
+	node->type_struct.abi = abi;
+
+	return node;
 }
 
 TekSynNode* TekGenSyn_gen_proc(TekWorker* w, uint32_t token_idx) {
@@ -552,7 +639,12 @@ TYPE_QUAL_END: {}
 		case '~':
 			type = TekGenSyn_gen_expr(w);
 			break;
+		case TekToken_struct:
+			TekGenSyn_token_move_next(w);
+			type = TekGenSyn_gen_type_struct(w, w->gen_syn.token_idx);
+			break;
 		case TekToken_proc:
+			TekGenSyn_token_move_next(w);
 			type = TekGenSyn_gen_proc_stub(w, w->gen_syn.token_idx, tek_true);
 			break;
 		case '&':

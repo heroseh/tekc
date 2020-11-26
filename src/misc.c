@@ -207,3 +207,8 @@ char* TekUnaryOp_strings[TekUnaryOp_COUNT] = {
 	[TekUnaryOp_ensure_null] = "ensure_null",
 };
 
+char* TekAbi_strings[TekProcCallConv_COUNT] = {
+	[TekAbi_tek] = "TekAbi_tek",
+	[TekAbi_c] = "TekAbi_c",
+};
+
