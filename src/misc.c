@@ -15,6 +15,7 @@ char* TekSynNodeKind_strings[] = {
 	[TekSynNodeKind_mod] = "mod",
 	[TekSynNodeKind_proc] = "proc",
 	[TekSynNodeKind_proc_param] = "proc_param",
+	[TekSynNodeKind_proc_param_return] = "proc_param_return",
 	[TekSynNodeKind_macro] = "macro",
 	[TekSynNodeKind_interf] = "interf",
 	[TekSynNodeKind_var] = "var",
@@ -136,6 +137,7 @@ char* TekToken_strings_non_ascii[] = {
     [TekToken_loop] = "loop",
     [TekToken_for] = "for",
     [TekToken_in] = "in",
+    [TekToken_case] = "case",
 
     //
     // compile time

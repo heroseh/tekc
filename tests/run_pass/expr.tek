@@ -11,6 +11,8 @@ expr_binary: proc(one: U32, two: U32) {
 	num = one * two
 	assert(num == 100)
 
+	return num: 55, error: true
+
 	num = one / two
 	assert(num == 4)
 

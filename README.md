@@ -28,9 +28,11 @@ Catch the development stream on [Twitch](https://twitch.tv/heroseh) every Thursd
 	- allows us to compare strings throughout the system by comparing a single integer
 - OS Virtual Memory Mapping abstraction, that reserves large ranges of address space to avoid reallocating.
 - A Lexer that creates a list of tokens directly from the code
+	- with complete error checking
+- A Syntax Tree Generator that creates a tree of syntax nodes
+	- with complete error checking
 
 # What is next?
-1. Create a syntax parser to create an syntax tree from the tokens.
 1. Create a semantic parser to create a semantic tree from the syntax tree.
 1. Create a simple assembly abstraction (something like LLVM IR but not SSA).
 1. Generate X86-64 from that assembly abstraction.
@@ -54,4 +56,5 @@ Run the Compiler on a test file
 ```
 
 Now open up **tests/run_pass/expr.tek** and **/tmp/tek_tokens** side by side and see the file broken up into tokens.
+You can also view the syntax tree by opening up **/tmp/tek_syntax_tree**
 

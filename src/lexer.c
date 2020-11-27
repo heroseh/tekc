@@ -777,13 +777,15 @@ STRING_CONTINUE: {}
 					ident_len += 1;
 				}
 
-				token = TekToken_ident;
-
 				uint32_t ident_start_idx = lexer->code_idx;
+
+				if (ident_len == 1 && (token == 'U' || token == 'S'))
+					goto TOKEN_END;
 
 				if (token == '\'') {
 					token = TekToken_label;
 				} else { // else identifier or directive
+					token = TekToken_ident;
 					switch (ident_len) {
 						case 2:
 							if (_TekLexer_compare_consume_lit(lexer, "if")) {
@@ -923,9 +925,12 @@ STRING_CONTINUE: {}
 						break;
 					};
 				}
+
 				break;
 			};
 		}
+
+TOKEN_END:
 
 		if (token >= 33 && token <= 127) { // if is a single character symbol in the ascii table
 			_TekLexer_advance_column(lexer, 1);

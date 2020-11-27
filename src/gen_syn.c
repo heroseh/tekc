@@ -50,11 +50,14 @@ static inline const TekValue* TekGenSyn_token_value_take(TekWorker* w) {
 		_e->args[0].token_idx = w->gen_syn.token_idx; \
 	}
 
-#define TekGenSyn_ensure_token(w, token, expected_token, error_kind) \
+#define TekGenSyn_ensure_token_rewind(w, token, expected_token, error_kind, num) \
 	if (token != expected_token) { \
+		w->gen_syn.token_idx -= num; \
 		TekGenSyn_error_token(w, error_kind); \
 		return NULL; \
 	}
+
+#define TekGenSyn_ensure_token(w, token, expected_token, error_kind) TekGenSyn_ensure_token_rewind(w, token, expected_token, error_kind, 0)
 
 //
 // new lines are combined in the lexer, so we only have to check once.
@@ -156,16 +159,21 @@ TekSynNode* TekGenSyn_gen_mod(TekWorker* w, uint32_t token_idx, TekBool is_file_
 				break;
 			case TekToken_end_of_file:
 				goto END;
+			case '}':
+				if (!is_file_root) {
+					token = TekGenSyn_token_move_next(w);
+					goto END;
+				}
 			default: {
 				//
 				// we must have a declaration, lets process the left hand side (identifier) first
-				TekSynNode* ident = TekGenSyn_gen_expr_multi(w, tek_false);
+				TekSynNode* ident = TekGenSyn_gen_expr_multi(w, tek_false, tek_false);
 				tek_ensure(ident);
 
 				//
 				// we must have a colon follow the left hand side.
 				token = TekGenSyn_token_peek(w);
-				TekGenSyn_ensure_token(w, token, ':', TekErrorKind_gen_syn_decl_mod_colon_must_follow_ident);
+				TekGenSyn_ensure_token(w, token, ':', TekErrorKind_gen_syn_mod_decl_colon_must_follow_ident);
 
 				//
 				// allocate a declaration and link the left hand side.
@@ -182,7 +190,8 @@ TekSynNode* TekGenSyn_gen_mod(TekWorker* w, uint32_t token_idx, TekBool is_file_
 				switch (token) {
 					case TekToken_mod: item = TekGenSyn_gen_mod(w, item_token_idx, tek_false); break;
 					case TekToken_proc: item = TekGenSyn_gen_proc(w, item_token_idx); break;
-					case TekToken_struct: item = TekGenSyn_gen_type_struct(w, item_token_idx); break;
+					case TekToken_struct:
+					case TekToken_union: item = TekGenSyn_gen_type_struct(w, item_token_idx, token == TekToken_union); break;
 					case TekToken_var: item = TekGenSyn_gen_var(w, item_token_idx, tek_true); break;
 					default:
 						w->gen_syn.token_idx = item_token_idx;
@@ -206,7 +215,8 @@ TekSynNode* TekGenSyn_gen_mod(TekWorker* w, uint32_t token_idx, TekBool is_file_
 		prev_entry = entry;
 
 		token = TekGenSyn_token_peek(w);
-		TekGenSyn_ensure_token(w, token, '\n', TekErrorKind_gen_syn_entry_expected_to_end_with_a_new_line);
+		if (token == '}') break;
+		TekGenSyn_ensure_token(w, token, '\n', TekErrorKind_gen_syn_mod_entry_expected_to_end_with_a_new_line);
 		token = TekGenSyn_token_move_next(w);
 	}
 END:
@@ -226,7 +236,7 @@ TekSynNode* TekGenSyn_gen_var(TekWorker* w, uint32_t token_idx, TekBool is_globa
 	if (token == '=') {
 		TekGenSyn_token_move_next(w);
 
-		TekSynNode* init_exprs = TekGenSyn_gen_expr_multi(w, tek_false);
+		TekSynNode* init_exprs = TekGenSyn_gen_expr_multi(w, tek_false, tek_false);
 		tek_ensure(init_exprs);
 
 		node[1].var.init_exprs_rel_idx = tek_rel_idx_u(
@@ -242,8 +252,8 @@ TekSynNode* TekGenSyn_gen_var_stub(TekWorker* w, uint32_t token_idx, TekBool is_
 	//
 	// generate the types if this is not the end of the var and we do not have an assign symbol.
 	TekToken token = TekGenSyn_token_peek(w);
-	if (token != '=' && token != '\n') {
-		TekSynNode* types = TekGenSyn_gen_expr_multi(w, tek_false);
+	if (token != '=' && token != '\n' && (token < TekToken_directive_START || token > TekToken_directive_END)) {
+		TekSynNode* types = TekGenSyn_gen_type_multi(w);
 		tek_ensure(types);
 
 		node[1].var.types_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_var_types_rel_idx, types, node);
@@ -321,9 +331,10 @@ TekSynNode* TekGenSyn_gen_import(TekWorker* w) {
 	return stmt;
 }
 
-TekSynNode* TekGenSyn_gen_type_struct(TekWorker* w, uint32_t token_idx) {
+TekSynNode* TekGenSyn_gen_type_struct(TekWorker* w, uint32_t token_idx, TekBool is_union) {
 	TekSynNode* node = TekGenSyn_gen_type_struct_stub(w, token_idx);
 	tek_ensure(node);
+	node[1].type_struct.is_union = is_union;
 
 	//
 	// move to the open curly brace if there is only new lines in the way
@@ -342,29 +353,42 @@ TekSynNode* TekGenSyn_gen_type_struct(TekWorker* w, uint32_t token_idx) {
 		while (token != '}') {
 			TekSynNode* field = NULL;
 
-			//
-			// lets process the left hand side (identifier) first
-			TekSynNode* ident = TekGenSyn_gen_expr(w);
-			tek_ensure(ident);
+			switch (token) {
+				case TekToken_struct:
+				case TekToken_union:
+					TekGenSyn_token_move_next(w);
+					field = TekGenSyn_gen_type_struct(w, token_idx, token == TekToken_union);
+					break;
+				case TekToken_ident: {
+					//
+					// lets process the left hand side (identifier) first
+					TekSynNode* ident = TekGenSyn_alloc_node(w, TekSynNodeKind_ident, w->gen_syn.token_idx, tek_false);
+					ident[1].ident_str_id = TekGenSyn_token_value_take(w)->str_id;
 
-			//
-			// we must have a colon follow the left hand side.
-			token = TekGenSyn_token_peek(w);
-			TekGenSyn_ensure_token(w, token, ':', TekErrorKind_gen_syn_type_struct_field_colon_must_follow_ident);
+					//
+					// we must have a colon follow the left hand side.
+					token = TekGenSyn_token_move_next(w);
+					TekGenSyn_ensure_token(w, token, ':', TekErrorKind_gen_syn_type_struct_field_colon_must_follow_ident);
 
-			//
-			// allocate a declaration and link the left hand side.
-			TekGenSyn_alloc_node_list_header(w);
-			field = TekGenSyn_alloc_node(w, TekSynNodeKind_struct_field, w->gen_syn.token_idx, tek_false);
-			field[1].struct_field.ident_rel_idx = tek_rel_idx_s(TekSynNode, TekSynNode_bits_struct_field_ident_rel_idx, ident, field);
+					//
+					// allocate a field and link the left hand side.
+					TekGenSyn_alloc_node_list_header(w);
+					field = TekGenSyn_alloc_node(w, TekSynNodeKind_struct_field, w->gen_syn.token_idx, tek_false);
+					field[1].struct_field.ident_rel_idx = tek_rel_idx_s(TekSynNode, TekSynNode_bits_struct_field_ident_rel_idx, ident, field);
 
-			//
-			// process the right hand side (the type)
-			token = TekGenSyn_token_move_next(w);
+					//
+					// process the right hand side (the type)
+					token = TekGenSyn_token_move_next(w);
 
-			TekSynNode* type = TekGenSyn_gen_type(w, tek_true);
-			tek_ensure(type);
-			field[1].struct_field.type_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_struct_field_type_rel_idx, type, field);
+					TekSynNode* type = TekGenSyn_gen_type(w, tek_true);
+					tek_ensure(type);
+					field[1].struct_field.type_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_struct_field_type_rel_idx, type, field);
+					break;
+				};
+				default:
+					TekGenSyn_error_token(w, TekErrorKind_gen_syn_type_struct_field_unexpected_token);
+					return NULL;
+			}
 
 			//
 			// link the field to the previous field
@@ -376,7 +400,8 @@ TekSynNode* TekGenSyn_gen_type_struct(TekWorker* w, uint32_t token_idx) {
 			prev_field = field;
 
 			token = TekGenSyn_token_peek(w);
-			TekGenSyn_ensure_token(w, token, '\n', TekErrorKind_gen_syn_entry_expected_to_end_with_a_new_line);
+			if (token == '}') break;
+			TekGenSyn_ensure_token(w, token, '\n', TekErrorKind_gen_syn_type_struct_field_expected_to_end_with_a_new_line);
 			token = TekGenSyn_token_move_next(w);
 		}
 		token = TekGenSyn_token_move_next(w);
@@ -402,7 +427,7 @@ TekSynNode* TekGenSyn_gen_type_struct_stub(TekWorker* w, uint32_t token_idx) {
 		abi < 1 << TekSynNode_bits_type_struct_abi,
 		"abi of '%u' exceeds the maximum value of '%u' that can be stored in the syntax tree",
 		abi, (1 << TekSynNode_bits_type_struct_abi) - 1);
-	node->type_struct.abi = abi;
+	node[1].type_struct.abi = abi;
 
 	return node;
 }
@@ -436,7 +461,7 @@ TekSynNode* TekGenSyn_gen_proc_stub(TekWorker* w, uint32_t token_idx, TekBool is
 	TekSynNode* node = TekGenSyn_alloc_node(w, is_type ? TekSynNodeKind_type_proc : TekSynNodeKind_proc, token_idx, tek_false);
 
 	TekGenSyn_skip_new_lines(w, token);
-	TekGenSyn_ensure_token(w, token, '(', TekErrorKind_gen_syn_proc_expected_parentheses);
+	TekGenSyn_ensure_token_rewind(w, token, '(', TekErrorKind_gen_syn_proc_expected_parentheses, 1);
 	{
 		//
 		// generate the parameters
@@ -498,29 +523,30 @@ PROCESS_START:
 		param[1].proc_param.is_vararg = is_vararg;
 		if (is_vararg) {
 			if (is_return_params) {
-				TekGenSyn_error_token(w, TekErrorKind_gen_syn_proc_params_cannot_have_vararg_in_return_params);
+				TekGenSyn_error_token(w, TekErrorKind_gen_syn_proc_param_cannot_have_vararg_in_return_params);
 			}
 			token = TekGenSyn_token_move_next(w);
 		}
 
+		TekGenSyn_ensure_token(w, token, TekToken_ident, TekErrorKind_gen_syn_proc_param_expected_identifer);
+
 		//
-		// generate the identifier, if we have a colon then process the type
-		TekSynNode* ident = TekGenSyn_gen_expr(w);
-		tek_ensure(ident);
-		TekSynNode* type = NULL;
-		token = TekGenSyn_token_peek(w);
-		if (token == ':') {
-			token = TekGenSyn_token_move_next(w);
-			type = TekGenSyn_gen_type(w, tek_true);
-			tek_ensure(type);
-			param[1].proc_param.ident_rel_idx = tek_rel_idx_u(
-				TekSynNode, TekSynNode_bits_proc_param_ident_rel_idx, ident, param);
-		} else {
-			// we have no colon so the identifier must be the type
-			type = ident;
-		}
-		param[1].proc_param.type_rel_idx = tek_rel_idx_u(
-			TekSynNode, TekSynNode_bits_proc_param_type_rel_idx, type, param);
+		// lets process the left hand side (identifier) first
+		TekSynNode* ident = TekGenSyn_alloc_node(w, TekSynNodeKind_ident, w->gen_syn.token_idx, tek_false);
+		ident[1].ident_str_id = TekGenSyn_token_value_take(w)->str_id;
+		param[1].proc_param.ident_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_proc_param_ident_rel_idx, ident, param);
+
+		//
+		// we must have a colon follow the left hand side.
+		token = TekGenSyn_token_move_next(w);
+		TekGenSyn_ensure_token(w, token, ':', TekErrorKind_gen_syn_proc_param_colon_must_follow_ident);
+
+		//
+		// process the right hand side (the type)
+		token = TekGenSyn_token_move_next(w);
+		TekSynNode* type = TekGenSyn_gen_type(w, tek_true);
+		tek_ensure(type);
+		param[1].proc_param.type_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_proc_param_type_rel_idx, type, param);
 
 		//
 		// generate a default value node if we have one
@@ -548,17 +574,24 @@ PROCESS_START:
 		//
 		// end if we have a close parentheses
 		switch (token) {
-			case ',':
 			case '\n':
+				// we have a comma after a new line.
+				// treat it as the same terminator by skipping over the new line.
+				if (TekGenSyn_token_peek_ahead(w, 1) == ',') {
+					token = TekGenSyn_token_move_next(w);
+				}
+				// fallthrough
+			case ',':
 				break;
 			case ')':
 				goto PARAMS_END;
 			default:
-				TekGenSyn_error_token(w, TekErrorKind_gen_syn_proc_params_unexpected_delimiter);
+				TekGenSyn_error_token(w, TekErrorKind_gen_syn_proc_param_unexpected_delimiter);
 				return NULL;
 		}
 
 		token = TekGenSyn_token_move_next(w);
+		TekGenSyn_skip_new_lines(w, token);
 	}
 
 PARAMS_END:
@@ -574,11 +607,61 @@ PARAMS_END:
 		is_return_params = tek_true;
 		token = TekGenSyn_token_move_next(w);
 		TekGenSyn_skip_new_lines(w, token);
-		TekGenSyn_ensure_token(w, token, '(', TekErrorKind_gen_syn_proc_expected_parentheses_to_follow_arrow);
+		TekGenSyn_ensure_token_rewind(w, token, '(', TekErrorKind_gen_syn_proc_expected_parentheses_to_follow_arrow, 1);
 		goto PROCESS_START;
 	}
 
 	return first_param ? first_param : (TekSynNode*)0x1;
+}
+
+TekSynNode* TekGenSyn_gen_type_multi(TekWorker* w) {
+	TekSynNode* first_header = NULL;
+	TekSynNode* prev_header = NULL;
+	uint16_t count = 0;
+	uint32_t token_idx = w->gen_syn.token_idx;
+	while (1) {
+		count += 1;
+
+		//
+		// generate the type
+		TekSynNode* expr = TekGenSyn_gen_type(w, tek_true);
+		tek_ensure(expr);
+
+		TekToken token = TekGenSyn_token_peek(w);
+		TekBool is_ending = tek_false;
+		//
+		// if we do not have a comma, then this is the end of the multi type.
+		// if we do not have a previous header, then just return the type.
+		if (token != ',') {
+			if (prev_header) is_ending = tek_true;
+			else return expr;
+		}
+
+		//
+		// add this type to the linked list chain
+		TekSynNode* header = TekGenSyn_alloc_node_list_header(w);
+		header->list_header.kind = TekSynNodeKind_expr_list_header;
+		header->list_header.item_rel_idx = tek_rel_idx_s(TekSynNode, TekSynNode_bits_list_header_item_rel_idx, expr, header);
+		if (prev_header)
+			prev_header->list_header.next_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_list_header_next_rel_idx, header, prev_header);
+		else
+			first_header = header;
+
+		if (is_ending) break;
+
+		token = TekGenSyn_token_move_next(w);
+		TekGenSyn_skip_new_lines(w, token);
+
+		prev_header = header;
+	}
+
+	//
+	// create a wrapper node to hold the multiple expression and a count.
+	TekSynNode* multi_expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_multi, token_idx, tek_false);
+	multi_expr[1].expr_multi.count = count;
+	multi_expr[1].expr_multi.list_head_rel_idx = tek_rel_idx_s16(TekSynNode, first_header, multi_expr);
+
+	return multi_expr;
 }
 
 TekSynNode* TekGenSyn_gen_type(TekWorker* w, TekBool is_required) {
@@ -640,8 +723,9 @@ TYPE_QUAL_END: {}
 			type = TekGenSyn_gen_expr(w);
 			break;
 		case TekToken_struct:
+		case TekToken_union:
 			TekGenSyn_token_move_next(w);
-			type = TekGenSyn_gen_type_struct(w, w->gen_syn.token_idx);
+			type = TekGenSyn_gen_type_struct(w, w->gen_syn.token_idx, token == TekToken_union);
 			break;
 		case TekToken_proc:
 			TekGenSyn_token_move_next(w);
@@ -707,7 +791,7 @@ TekSynNode* TekGenSyn_gen_type_array(TekWorker* w) {
 	//
 	// if nothing is in the square brackets then it is a view type
 	if (TekGenSyn_token_peek_ahead(w, 1) == ']') {
-		TekGenSyn_token_move_ahead(w, 2);
+		TekGenSyn_token_move_next(w);
 		return TekGenSyn_gen_type_ptr(w, TekSynNodeKind_type_view);
 	}
 
@@ -747,12 +831,13 @@ TekSynNode* TekGenSyn_gen_type_bounded_int(TekWorker* w, TekBool is_signed) {
 	TekGenSyn_ensure_token(w, token, '|', TekErrorKind_gen_syn_type_bounded_int_expected_pipe_and_bit_count);
 	token = TekGenSyn_token_move_next(w);
 
-	TekSynNode* bit_count_expr = TekGenSyn_gen_expr(w);
+	TekSynNode* bit_count_expr = TekGenSyn_gen_expr_unary(w, tek_false);
 	tek_ensure(bit_count_expr);
 	type[1].type_bounded_int.bit_count_expr_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_type_bounded_int_bit_count_expr_rel_idx, bit_count_expr, type);
 
 	token = TekGenSyn_token_peek(w);
 	if (token == '|') {
+		token = TekGenSyn_token_move_next(w);
 		TekSynNode* range_expr = TekGenSyn_gen_expr(w);
 		tek_ensure(range_expr);
 		type[1].type_bounded_int.range_expr_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_type_bounded_int_range_expr_rel_idx, range_expr, type);
@@ -761,7 +846,7 @@ TekSynNode* TekGenSyn_gen_type_bounded_int(TekWorker* w, TekBool is_signed) {
 	return type;
 }
 
-TekSynNode* TekGenSyn_gen_expr_multi(TekWorker* w, TekBool process_named_args) {
+TekSynNode* TekGenSyn_gen_expr_multi(TekWorker* w, TekBool process_named_args, TekBool allow_new_line) {
 	TekSynNode* first_header = NULL;
 	TekSynNode* prev_header = NULL;
 	uint16_t count = 0;
@@ -797,12 +882,21 @@ TekSynNode* TekGenSyn_gen_expr_multi(TekWorker* w, TekBool process_named_args) {
 			token = TekGenSyn_token_peek(w);
 		}
 
+		TekBool is_ending = tek_false;
 		//
 		// if we do not have a comma, then this is the end of the multi expression.
 		// if we do not have a previous header, then just return the expression.
 		if (token != ',') {
-			if (prev_header) break;
-			else return expr;
+			if (!allow_new_line || token != '\n') {
+				if (prev_header) is_ending = tek_true;
+				else return expr;
+			} else if (token == '\n') {
+				// if new lines are allowed and we have a comma after a new line.
+				// treat it as the same terminator by skipping over the new line.
+				if (TekGenSyn_token_peek_ahead(w, 1) == ',') {
+					token = TekGenSyn_token_move_next(w);
+				}
+			}
 		}
 
 		//
@@ -814,6 +908,8 @@ TekSynNode* TekGenSyn_gen_expr_multi(TekWorker* w, TekBool process_named_args) {
 			prev_header->list_header.next_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_list_header_next_rel_idx, header, prev_header);
 		else
 			first_header = header;
+
+		if (is_ending) break;
 
 		token = TekGenSyn_token_move_next(w);
 		TekGenSyn_skip_new_lines(w, token);
@@ -837,7 +933,7 @@ TekSynNode* TekGenSyn_gen_expr(TekWorker* w) {
 TekSynNode* TekGenSyn_gen_expr_with(TekWorker* w, uint8_t min_precedence) {
 	//
 	// generate the left hand side expression
-	TekSynNode* left_expr = TekGenSyn_gen_expr_unary(w);
+	TekSynNode* left_expr = TekGenSyn_gen_expr_unary(w, min_precedence == 1);
 	tek_ensure(left_expr);
 
 	//
@@ -865,22 +961,26 @@ TekSynNode* TekGenSyn_gen_expr_with(TekWorker* w, uint8_t min_precedence) {
 				// no arguments for the call expression.
 				right_expr = (TekSynNode*)0x1;
 			} else {
-				right_expr = TekGenSyn_gen_expr_multi(w, tek_true);
+				right_expr = TekGenSyn_gen_expr_multi(w, tek_true, tek_true);
+				tek_ensure(right_expr);
+
 				token = TekGenSyn_token_peek(w);
 				TekGenSyn_ensure_token(w, token, ')', TekErrorKind_gen_syn_expr_call_expected_close_parentheses);
 			}
 			token = TekGenSyn_token_move_next(w);
+		} else if (binary_op == TekBinaryOp_index) {
+			right_expr = TekGenSyn_gen_expr_with(w, 0);
+			tek_ensure(right_expr);
+
+			token = TekGenSyn_token_peek(w);
+			TekGenSyn_ensure_token(w, token, ']', TekErrorKind_gen_syn_expr_index_expected_close_bracket);
+			TekGenSyn_token_move_next(w);
 		} else {
 			//
 			// recursively call with the precedence of this binary operation.
 			right_expr = TekGenSyn_gen_expr_with(w, precedence);
-			if (binary_op == TekBinaryOp_index) {
-				token = TekGenSyn_token_peek(w);
-				TekGenSyn_ensure_token(w, token, ']', TekErrorKind_gen_syn_expr_index_expected_close_bracket);
-				TekGenSyn_token_move_next(w);
-			}
+			tek_ensure(right_expr);
 		}
-		tek_ensure(right_expr);
 
 		TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_op_binary, binary_op_token_idx, tek_false);
 		expr[1].binary.op = binary_op;
@@ -900,7 +1000,7 @@ TekSynNode* TekGenSyn_gen_expr_with(TekWorker* w, uint8_t min_precedence) {
 	return left_expr;
 }
 
-TekSynNode* TekGenSyn_gen_expr_unary(TekWorker* w) {
+TekSynNode* TekGenSyn_gen_expr_unary(TekWorker* w, TekBool is_field_access) {
 	TekToken token = TekGenSyn_token_peek(w);
 	TekSynNodeKind kind;
 	TekUnaryOp unary_op = 0;
@@ -940,7 +1040,7 @@ VALUE:
 			TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_up_parent_mods, token_idx, tek_false);
 			expr[1].expr_up_parent_mods.count = up_parent_mods_count;
 
-			TekSynNode* sub_expr = TekGenSyn_gen_expr_unary(w);
+			TekSynNode* sub_expr = TekGenSyn_gen_expr_unary(w, tek_false);
 			tek_ensure(sub_expr);
 			expr[1].expr_up_parent_mods.sub_expr_rel_idx = tek_rel_idx_u16(TekSynNode, sub_expr, expr);
 
@@ -951,7 +1051,7 @@ VALUE:
 			TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_root_mod, w->gen_syn.token_idx, tek_false);
 			token = TekGenSyn_token_move_next(w);
 
-			TekSynNode* sub_expr = TekGenSyn_gen_expr_unary(w);
+			TekSynNode* sub_expr = TekGenSyn_gen_expr_unary(w, tek_false);
 			tek_ensure(sub_expr);
 			expr[1].next_node_idx = sub_expr - w->gen_syn.nodes;
 
@@ -967,10 +1067,16 @@ VALUE:
 		case TekToken_question_and_exclamation_mark: unary_op = TekUnaryOp_ensure_null; goto UNARY;
 UNARY:
 		{
-			TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_op_unary, w->gen_syn.token_idx, tek_false);
-			expr[1].unary.op = unary_op;
-			TekGenSyn_token_move_next(w);
-			return expr;
+			if (is_field_access) {
+				TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_op_unary, w->gen_syn.token_idx, tek_false);
+				expr[1].unary.op = unary_op;
+				TekGenSyn_token_move_next(w);
+				return expr;
+			} else {
+				TekGenSyn_error_token(w, TekErrorKind_gen_syn_expr_incorrect_unary_op_placement);
+				return NULL;
+			}
+			break;
 		};
 		case '(': {
 			token = TekGenSyn_token_move_next(w);
@@ -991,7 +1097,7 @@ UNARY:
 		case TekToken_loop:
 			kind = TekSynNodeKind_expr_loop;
 			token = TekGenSyn_token_move_next(w);
-			TekGenSyn_ensure_token(w, token, '{', TekErrorKind_gen_syn_expr_loop_expected_curly_brace);
+			TekGenSyn_ensure_token_rewind(w, token, '{', TekErrorKind_gen_syn_expr_loop_expected_curly_brace, 1);
 			goto STMT_BLOCK;
 STMT_BLOCK:
 			return TekGenSyn_gen_stmt_block_with(w, kind);
@@ -1003,13 +1109,13 @@ STMT_BLOCK:
 			return TekGenSyn_gen_expr_match(w);
 
 		case TekToken_for:
-			return TekGenSyn_gen_for_expr(w);
+			return TekGenSyn_gen_expr_for(w);
 
 		case '[': {
 			TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_lit_array, w->gen_syn.token_idx, tek_false);
 			TekGenSyn_token_move_next(w);
 
-			TekSynNode* values_expr = TekGenSyn_gen_expr_multi(w, tek_true);
+			TekSynNode* values_expr = TekGenSyn_gen_expr_multi(w, tek_true, tek_true);
 			tek_ensure(values_expr);
 
 			expr[1].next_node_idx = values_expr - w->gen_syn.nodes;
@@ -1038,15 +1144,14 @@ TYPE_REF:
 			TekSynNode* node = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_vararg_spread, w->gen_syn.token_idx, tek_false);
 			token = TekGenSyn_token_move_next(w);
 
-			TekSynNode* expr = TekGenSyn_gen_expr_unary(w);
+			TekSynNode* expr = TekGenSyn_gen_expr_unary(w, tek_false);
 			tek_ensure(expr);
 			node[1].next_node_idx = expr - w->gen_syn.nodes;
 		};
 	}
 
-	char token_name[128];
-	TekToken_as_string(token, token_name, sizeof(token_name));
-	tek_abort("unreachable code -> token '%s' has not been handled when generating a unary expression", token_name);
+	TekGenSyn_error_token(w, TekErrorKind_gen_syn_expr_unexpected_token);
+	return NULL;
 }
 
 TekSynNode* TekGenSyn_gen_expr_if(TekWorker* w) {
@@ -1065,6 +1170,12 @@ TekSynNode* TekGenSyn_gen_expr_if(TekWorker* w) {
 
 	//
 	// generate the true block
+	token = TekGenSyn_token_peek(w);
+	TekGenSyn_ensure_token(w, token, '{', TekErrorKind_gen_syn_expr_if_expected_stmt_block);
+	if (token == '\n' && TekGenSyn_token_peek_ahead(w, 1) == '{') {
+		// move to the curly brace if there is only new lines in the way
+		token = TekGenSyn_token_move_next(w);
+	}
 	TekSynNode* success_expr = TekGenSyn_gen_stmt_block(w);
 	tek_ensure(success_expr);
 	expr[1].expr_if.success_expr_rel_idx = tek_rel_idx_u16(TekSynNode, success_expr, expr);
@@ -1075,6 +1186,10 @@ TekSynNode* TekGenSyn_gen_expr_if(TekWorker* w) {
 	if (token == TekToken_else) {
 		TekSynNode* else_expr = NULL;
 		token = TekGenSyn_token_move_next(w);
+		if (token == '\n' && TekGenSyn_token_peek_ahead(w, 1) == '{') {
+			// move to the curly brace if there is only new lines in the way
+			token = TekGenSyn_token_move_next(w);
+		}
 		switch (token) {
 			case '{': else_expr = TekGenSyn_gen_stmt_block(w); break;
 			case TekToken_if: else_expr = TekGenSyn_gen_expr_if(w); break;
@@ -1099,19 +1214,18 @@ TekSynNode* TekGenSyn_gen_expr_match(TekWorker* w) {
 	TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_match, w->gen_syn.token_idx, tek_false);
 	token = TekGenSyn_token_move_next(w);
 
-	TekSynNode* cond_expr = TekGenSyn_gen_expr_multi(w, tek_false);
+	TekSynNode* cond_expr = TekGenSyn_gen_expr_multi(w, tek_false, tek_false);
 	tek_ensure(cond_expr);
 	expr[1].expr_match.cond_expr_rel_idx = tek_rel_idx_u16(TekSynNode, cond_expr, expr);
 
 	token = TekGenSyn_token_peek(w);
 	TekGenSyn_ensure_token(w, token, '{', TekErrorKind_gen_syn_expr_match_must_define_cases);
+	token = TekGenSyn_token_move_next(w);
+	TekGenSyn_skip_new_lines(w, token);
 
 	TekSynNode* first_case = NULL;
 	TekSynNode* prev_case = NULL;
 	while (token != '}') {
-		token = TekGenSyn_token_move_next(w);
-		TekGenSyn_skip_new_lines(w, token);
-
 		//
 		// allocate the list header that comes directly before the next node.
 		// WARNING: make sure that all nodes that can be allocated next will
@@ -1128,7 +1242,7 @@ TekSynNode* TekGenSyn_gen_expr_match(TekWorker* w) {
 				case_expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_match_case, w->gen_syn.token_idx, tek_false);
 				TekGenSyn_token_move_next(w);
 
-				TekSynNode* sub_expr = TekGenSyn_gen_expr_multi(w, tek_false);
+				TekSynNode* sub_expr = TekGenSyn_gen_expr_multi(w, tek_false, tek_false);
 				tek_ensure(sub_expr);
 
 				case_expr[1].next_node_idx = sub_expr - w->gen_syn.nodes;
@@ -1136,13 +1250,12 @@ TekSynNode* TekGenSyn_gen_expr_match(TekWorker* w) {
 
 			case TekToken_else:
 				case_expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_match_else, w->gen_syn.token_idx, tek_false);
+				TekGenSyn_token_move_next(w);
 				break;
 
 			case '{':
 				case_expr = TekGenSyn_gen_stmt_block(w);
 				break;
-			case '}':
-				goto END;
 			default:
 				TekGenSyn_error_token(w, TekErrorKind_gen_syn_expr_match_unexpected_token);
 				return NULL;
@@ -1156,6 +1269,13 @@ TekSynNode* TekGenSyn_gen_expr_match(TekWorker* w) {
 			first_case = case_expr;
 		}
 		prev_case = case_expr;
+
+		token = TekGenSyn_token_peek(w);
+		if (token == '}') break;
+		if (token != '{') {
+			TekGenSyn_ensure_token(w, token, '\n', TekErrorKind_gen_syn_expr_match_case_expected_to_end_with_a_new_line);
+			token = TekGenSyn_token_move_next(w);
+		}
 	}
 
 END:
@@ -1166,11 +1286,12 @@ END:
 	return expr;
 }
 
-TekSynNode* TekGenSyn_gen_for_expr(TekWorker* w) {
+TekSynNode* TekGenSyn_gen_expr_for(TekWorker* w) {
 	TekSynNode* expr = TekGenSyn_alloc_node(w, TekSynNodeKind_expr_for, w->gen_syn.token_idx, tek_false);
+	TekGenSyn_alloc_node_list_header(w); // allocate the node to hold the index to the statement block of the for loop.
 	TekToken token = TekGenSyn_token_move_next(w);
 
-	TekSynNode* identifiers_list_head_expr = TekGenSyn_gen_expr_multi(w, tek_false);
+	TekSynNode* identifiers_list_head_expr = TekGenSyn_gen_expr_multi(w, tek_false, tek_false);
 	tek_ensure(identifiers_list_head_expr);
 	expr[1].expr_for.identifiers_list_head_expr_rel_idx = tek_rel_idx_u(
 		TekSynNode, TekSynNode_bits_expr_for_identifiers_list_head_expr_rel_idx, identifiers_list_head_expr, expr);
@@ -1180,7 +1301,7 @@ TekSynNode* TekGenSyn_gen_for_expr(TekWorker* w) {
 	if (token == ':') {
 		TekGenSyn_token_move_next(w);
 
-		TekSynNode* types_list_head = TekGenSyn_gen_expr_multi(w, tek_false);
+		TekSynNode* types_list_head = TekGenSyn_gen_type_multi(w);
 		tek_ensure(types_list_head);
 		expr[1].expr_for.types_list_head_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_expr_for_types_list_head_rel_idx, types_list_head, expr);
 
@@ -1194,26 +1315,18 @@ TekSynNode* TekGenSyn_gen_for_expr(TekWorker* w) {
 
 	//
 	// check for the is by value and is reverse symbols
-	TekBool is_by_value, is_reverse;
-	{
-		is_by_value = token == '*';
-		if (is_by_value) {
-			token = TekGenSyn_token_move_next(w);
+	TekBool is_by_value = tek_false, is_reverse = tek_false;
+	while (1) {
+		switch (token) {
+			case '*': is_by_value = tek_true; break;
+			case '!': is_reverse = tek_true; break;
+			default: goto END_FLAGS;
 		}
-
-		is_reverse = token == '!';
-		if (is_reverse) {
-			token = TekGenSyn_token_move_next(w);
-
-			// check this one again, just in case they are the other way round
-			is_by_value = token == '*';
-			if (is_by_value) {
-				token = TekGenSyn_token_move_next(w);
-			}
-		}
+		token = TekGenSyn_token_move_next(w);
 	}
-	expr->expr_for.is_by_value = is_by_value;
-	expr->expr_for.is_reverse = is_reverse;
+END_FLAGS:
+	expr[1].expr_for.is_by_value = is_by_value;
+	expr[1].expr_for.is_reverse = is_reverse;
 
 	//
 	// generate the iterator expression
@@ -1223,6 +1336,12 @@ TekSynNode* TekGenSyn_gen_for_expr(TekWorker* w) {
 
 	//
 	// generate the statement block
+	token = TekGenSyn_token_peek(w);
+	if (token == '\n' && TekGenSyn_token_peek_ahead(w, 1) == '{') {
+		// move to the curly brace if there is only new lines in the way
+		token = TekGenSyn_token_move_next(w);
+	}
+	TekGenSyn_ensure_token(w, token, '{', TekErrorKind_gen_syn_expr_for_expected_stmt_block);
 	TekSynNode* stmt_block_expr = TekGenSyn_gen_stmt_block(w);
 	tek_ensure(stmt_block_expr);
 	//
@@ -1275,7 +1394,10 @@ TekSynNode* TekGenSyn_gen_stmt_block_with(TekWorker* w, TekSynNodeKind kind) {
 		prev_header = header;
 	}
 
-	expr[1].expr_stmt_block.stmts_list_head_rel_idx = tek_rel_idx_u16(TekSynNode, first_header, expr);
+	if (first_header) {
+		expr[1].expr_stmt_block.stmts_list_head_rel_idx = tek_rel_idx_u16(TekSynNode, first_header, expr);
+	}
+
 	TekGenSyn_token_move_next(w);
 	return expr;
 }
@@ -1299,7 +1421,7 @@ TekSynNode* TekGenSyn_gen_stmt(TekWorker* w) {
 			//
 			// generate the return arguments if we have any
 			if (token != '\n') {
-				TekSynNode* args_expr = TekGenSyn_gen_expr_multi(w, tek_true);
+				TekSynNode* args_expr = TekGenSyn_gen_expr_multi(w, tek_true, tek_false);
 				tek_ensure(args_expr);
 				if (args_expr != (TekSynNode*)0x1) {
 					stmt[1].stmt_return.args_list_head_expr_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_stmt_return_args_list_head_expr_rel_idx, args_expr, stmt);
@@ -1323,6 +1445,11 @@ TekSynNode* TekGenSyn_gen_stmt(TekWorker* w) {
 		case TekToken_defer: {
 			TekSynNode* stmt = TekGenSyn_alloc_node(w, TekSynNodeKind_stmt_defer, w->gen_syn.token_idx, tek_false);
 			token = TekGenSyn_token_move_next(w);
+
+			if (token == '\n' && TekGenSyn_token_peek_ahead(w, 1) == '{') {
+				// move to the curly brace if there is only new lines in the way
+				token = TekGenSyn_token_move_next(w);
+			}
 
 			//
 			// generate a single expression or a statement block
@@ -1356,7 +1483,7 @@ TekSynNode* TekGenSyn_gen_stmt(TekWorker* w) {
 	// generate an expression.
 	// depending on the next token, this could also be the
 	// left hand side of a binary statement/declaration.
-	TekSynNode* expr = TekGenSyn_gen_expr_multi(w, tek_false);
+	TekSynNode* expr = TekGenSyn_gen_expr_multi(w, tek_false, tek_false);
 	tek_ensure(expr);
 
 	token = TekGenSyn_token_peek(w);
@@ -1435,7 +1562,7 @@ BINARY_OP:
 			//
 			// now generate the right hand side expression.
 			// this is the value being assigned
-			TekSynNode* right_expr = TekGenSyn_gen_expr_multi(w, tek_false);
+			TekSynNode* right_expr = TekGenSyn_gen_expr_multi(w, tek_false, tek_false);
 			tek_ensure(right_expr);
 			stmt[1].binary.right_rel_idx = tek_rel_idx_u(TekSynNode, TekSynNode_bits_binary_right_rel_idx, right_expr, stmt);
 

@@ -388,6 +388,9 @@ enum {
     TekToken_directive_intrinsic,
 };
 
+#define TekToken_directive_START TekToken_directive_import
+#define TekToken_directive_END TekToken_directive_intrinsic
+
 //===========================================================================================
 //
 //
@@ -540,8 +543,9 @@ struct TekSynNode {
 		} var;
 		struct {
 #define TekSynNode_bits_type_struct_abi 3
-#define TekSynNode_bits_type_struct_fields_list_head_rel_idx 28
+#define TekSynNode_bits_type_struct_fields_list_head_rel_idx 27
 			uint32_t is_generic: 1;
+			uint32_t is_union: 1;
 			uint32_t abi: TekSynNode_bits_type_struct_abi;
 			uint32_t fields_list_head_rel_idx: TekSynNode_bits_type_struct_fields_list_head_rel_idx;
 		} type_struct;
@@ -714,23 +718,24 @@ extern TekSynNode* TekGenSyn_gen_mod(TekWorker* w, uint32_t token_idx, TekBool i
 extern TekSynNode* TekGenSyn_gen_var(TekWorker* w, uint32_t token_idx, TekBool is_global);
 extern TekSynNode* TekGenSyn_gen_var_stub(TekWorker* w, uint32_t token_idx, TekBool is_global);
 extern TekSynNode* TekGenSyn_gen_import(TekWorker* w);
-extern TekSynNode* TekGenSyn_gen_type_struct(TekWorker* w, uint32_t token_idx);
+extern TekSynNode* TekGenSyn_gen_type_struct(TekWorker* w, uint32_t token_idx, TekBool is_union);
 extern TekSynNode* TekGenSyn_gen_type_struct_stub(TekWorker* w, uint32_t token_idx);
 extern TekSynNode* TekGenSyn_gen_proc(TekWorker* w, uint32_t token_idx);
 extern TekSynNode* TekGenSyn_gen_proc_stub(TekWorker* w, uint32_t token_idx, TekBool is_type);
 extern TekSynNode* TekGenSyn_gen_proc_params(TekWorker* w);
 extern TekSynNode* TekGenSyn_gen_multi_type(TekWorker* w);
+extern TekSynNode* TekGenSyn_gen_type_multi(TekWorker* w);
 extern TekSynNode* TekGenSyn_gen_type(TekWorker* w, TekBool is_required);
 extern TekSynNode* TekGenSyn_gen_type_ptr(TekWorker* w, TekSynNodeKind kind);
 extern TekSynNode* TekGenSyn_gen_type_array(TekWorker* w);
 extern TekSynNode* TekGenSyn_gen_type_bounded_int(TekWorker* w, TekBool is_signed);
-extern TekSynNode* TekGenSyn_gen_expr_multi(TekWorker* w, TekBool process_named_args);
+extern TekSynNode* TekGenSyn_gen_expr_multi(TekWorker* w, TekBool process_named_args, TekBool allow_new_line);
 extern TekSynNode* TekGenSyn_gen_expr(TekWorker* w);
 extern TekSynNode* TekGenSyn_gen_expr_with(TekWorker* w, uint8_t min_precedence);
-extern TekSynNode* TekGenSyn_gen_expr_unary(TekWorker* w);
+extern TekSynNode* TekGenSyn_gen_expr_unary(TekWorker* w, TekBool is_field_access);
 extern TekSynNode* TekGenSyn_gen_expr_if(TekWorker* w);
 extern TekSynNode* TekGenSyn_gen_expr_match(TekWorker* w);
-extern TekSynNode* TekGenSyn_gen_for_expr(TekWorker* w);
+extern TekSynNode* TekGenSyn_gen_expr_for(TekWorker* w);
 extern TekSynNode* TekGenSyn_gen_stmt_block(TekWorker* w);
 extern TekSynNode* TekGenSyn_gen_stmt_block_with(TekWorker* w, TekSynNodeKind kind);
 extern TekSynNode* TekGenSyn_gen_stmt(TekWorker* w);
@@ -1136,28 +1141,37 @@ enum {
 	//
 	// Syntax Tree Generator
 	//
-	TekErrorKind_gen_syn_mod_must_have_impl,
-	TekErrorKind_gen_syn_decl_mod_colon_must_follow_ident,
-	TekErrorKind_gen_syn_decl_expected_keyword,
-	TekErrorKind_gen_syn_entry_expected_to_end_with_a_new_line,
-	TekErrorKind_gen_syn_type_struct_field_colon_must_follow_ident,
-	TekErrorKind_gen_syn_proc_expected_parentheses,
-	TekErrorKind_gen_syn_proc_expected_parentheses_to_follow_arrow,
-	TekErrorKind_gen_syn_proc_params_cannot_have_vararg_in_return_params,
-	TekErrorKind_gen_syn_proc_params_unexpected_delimiter,
-	TekErrorKind_gen_syn_type_unexpected_token,
-	TekErrorKind_gen_syn_type_bounded_int_expected_pipe_and_bit_count,
-	TekErrorKind_gen_syn_expr_call_expected_close_parentheses,
-	TekErrorKind_gen_syn_type_array_expected_close_bracket,
-	TekErrorKind_gen_syn_expr_index_expected_close_bracket,
-	TekErrorKind_gen_syn_expr_expected_close_parentheses,
-	TekErrorKind_gen_syn_expr_loop_expected_curly_brace,
-	TekErrorKind_gen_syn_expr_array_expected_close_bracket,
-	TekErrorKind_gen_syn_expr_if_else_unexpected_token,
-	TekErrorKind_gen_syn_expr_match_must_define_cases,
-	TekErrorKind_gen_syn_expr_match_unexpected_token,
-	TekErrorKind_gen_syn_expr_for_expected_in_keyword,
-	TekErrorKind_gen_syn_stmt_only_allow_var_decl,
+	TekErrorKind_gen_syn_mod_must_have_impl, // location: args[0].token_idx
+	TekErrorKind_gen_syn_mod_decl_colon_must_follow_ident, // location: args[0].token_idx
+	TekErrorKind_gen_syn_decl_expected_keyword, // location: args[0].token_idx
+	TekErrorKind_gen_syn_mod_entry_expected_to_end_with_a_new_line, // location: args[0].token_idx
+	TekErrorKind_gen_syn_type_struct_field_colon_must_follow_ident, // location: args[0].token_idx
+	TekErrorKind_gen_syn_type_struct_field_expected_to_end_with_a_new_line, // location: args[0].token_idx
+	TekErrorKind_gen_syn_type_struct_field_unexpected_token, // location: args[0].token_idx
+	TekErrorKind_gen_syn_proc_expected_parentheses, // location: args[0].token_idx
+	TekErrorKind_gen_syn_proc_expected_parentheses_to_follow_arrow, // location: args[0].token_idx
+	TekErrorKind_gen_syn_proc_param_cannot_have_vararg_in_return_params, // location: args[0].token_idx
+	TekErrorKind_gen_syn_proc_param_expected_identifer, // location: args[0].token_idx
+	TekErrorKind_gen_syn_proc_param_colon_must_follow_ident, // location: args[0].token_idx
+	TekErrorKind_gen_syn_proc_param_unexpected_delimiter, // location: args[0].token_idx
+	TekErrorKind_gen_syn_expr_unexpected_token, // location: args[0].token_idx
+	TekErrorKind_gen_syn_expr_incorrect_unary_op_placement, // location: args[0].token_idx
+	TekErrorKind_gen_syn_type_unexpected_token, // location: args[0].token_idx
+	TekErrorKind_gen_syn_type_bounded_int_expected_pipe_and_bit_count, // location: args[0].token_idx
+	TekErrorKind_gen_syn_expr_call_expected_close_parentheses, // location: args[0].token_idx
+	TekErrorKind_gen_syn_type_array_expected_close_bracket, // location: args[0].token_idx
+	TekErrorKind_gen_syn_expr_index_expected_close_bracket, // location: args[0].token_idx
+	TekErrorKind_gen_syn_expr_expected_close_parentheses, // location: args[0].token_idx
+	TekErrorKind_gen_syn_expr_loop_expected_curly_brace, // location: args[0].token_idx
+	TekErrorKind_gen_syn_expr_array_expected_close_bracket, // location: args[0].token_idx
+	TekErrorKind_gen_syn_expr_if_expected_stmt_block, // location: args[0].token_idx
+	TekErrorKind_gen_syn_expr_if_else_unexpected_token, // location: args[0].token_idx
+	TekErrorKind_gen_syn_expr_match_must_define_cases, // location: args[0].token_idx
+	TekErrorKind_gen_syn_expr_match_unexpected_token, // location: args[0].token_idx
+	TekErrorKind_gen_syn_expr_match_case_expected_to_end_with_a_new_line, // location: args[0].token_idx
+	TekErrorKind_gen_syn_expr_for_expected_stmt_block, // location: args[0].token_idx
+	TekErrorKind_gen_syn_expr_for_expected_in_keyword, // location: args[0].token_idx
+	TekErrorKind_gen_syn_stmt_only_allow_var_decl, // location: args[0].token_idx
 
 	TekErrorKind_COUNT,
 };

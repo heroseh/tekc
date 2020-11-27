@@ -819,6 +819,7 @@ NEXT_NODE: {}
 			break;
 
 		case TekSynNodeKind_proc_param:
+		case TekSynNodeKind_proc_param_return:
 			if (node[1].proc_param.is_vararg) {
 				TekCompiler_debug_indent(output, indent_level);
 				TekStk_push_str(output, "vararg: true\n");
@@ -1127,7 +1128,7 @@ NEXT_NODE: {}
 			break;
 
 		default:
-			tek_abort("unhandled syntax node kind '%s'", TekSynNodeKind_strings[node[1].header.kind]);
+			tek_abort("unhandled syntax node kind %u '%s'", node->header.kind, TekSynNodeKind_strings[node->header.kind]);
 	}
 }
 
@@ -1201,27 +1202,37 @@ static char* TekErrorKind_message[TekErrorKind_COUNT] = {
 	[TekErrorKind_lexer_invalid_close_bracket] = "invalid close bracket",
 	[TekErrorKind_lexer_multiline_string_indent_different_char] = "a different character has been used to indent the multiline string",
 	[TekErrorKind_lexer_multiline_string_indent_is_not_enough] = "the indentation does not match the first indentation of the multiline string",
-	[TekErrorKind_gen_syn_mod_must_have_impl] = "a module must have an implementation, use the curly brace '{' after the mod keyword",
-	[TekErrorKind_gen_syn_decl_mod_colon_must_follow_ident] = "a colon ':' must follow the declaration identifier",
+	[TekErrorKind_gen_syn_mod_must_have_impl] = "a module must have an implementation, use the '{' after the 'mod' keyword",
+	[TekErrorKind_gen_syn_mod_decl_colon_must_follow_ident] = "expected a ':' here so it follows the identifier for declartion",
 	[TekErrorKind_gen_syn_decl_expected_keyword] = "expected a declaration item keyword like 'mod', 'struct', 'proc', 'enum', 'interf'",
-	[TekErrorKind_gen_syn_entry_expected_to_end_with_a_new_line] = "entry must end with a new line so we can tell where it ends",
-	[TekErrorKind_gen_syn_proc_expected_parentheses] = "parentheses '(' must follow the 'proc' keyword to define some parameters",
-	[TekErrorKind_gen_syn_proc_expected_parentheses_to_follow_arrow] = "parentheses '(' must follow the '->' to define some return parameters",
-	[TekErrorKind_gen_syn_proc_params_cannot_have_vararg_in_return_params] = "we cannot have a vararg in the return parameters",
-	[TekErrorKind_gen_syn_proc_params_unexpected_delimiter] = "expected ',' to declare another parameter or a ')' to finish declaring parameters",
-	[TekErrorKind_gen_syn_type_unexpected_token] = "expected a type",
-	[TekErrorKind_gen_syn_type_bounded_int_expected_pipe_and_bit_count] = "expected a '|' followed by the number of bits to use for this bounded integer",
-	[TekErrorKind_gen_syn_expr_call_expected_close_parentheses] = "expected a parentheses ')' to finish the call expression",
-	[TekErrorKind_gen_syn_type_array_expected_close_bracket] = "expected a bracket ']' to finish the array type",
-	[TekErrorKind_gen_syn_expr_index_expected_close_bracket] = "expected a bracket ']' to finish the index expression",
-	[TekErrorKind_gen_syn_expr_expected_close_parentheses] = "expected a parentheses ')' to finish the expression",
-	[TekErrorKind_gen_syn_expr_loop_expected_curly_brace] = "expected a curly brace '{' to follow the loop keyword",
-	[TekErrorKind_gen_syn_expr_array_expected_close_bracket] = "expected a bracket ']' to finish the array expression",
-	[TekErrorKind_gen_syn_expr_if_else_unexpected_token] = "expected an '{' to declare an else block or a 'if' to declare an else if",
-	[TekErrorKind_gen_syn_expr_match_must_define_cases] = "a match must define its cases, use the curly brace '{' a create a list of cases",
-	[TekErrorKind_gen_syn_expr_match_unexpected_token] = "expected 'case' for a condition, 'else' for the else block, '{' to define a block for a case or '}' to finish the match expression",
-	[TekErrorKind_gen_syn_expr_for_expected_in_keyword] = "expected 'in' keyword to follow the variable declartion of the for loop expression",
-	[TekErrorKind_gen_syn_stmt_only_allow_var_decl] = "inside statement block, we can only have 'var' declartions",
+	[TekErrorKind_gen_syn_mod_entry_expected_to_end_with_a_new_line] = "module entry must end with a new line or a ';'",
+	[TekErrorKind_gen_syn_type_struct_field_colon_must_follow_ident] = "expected a ':' here so it follows the identifier for structure field",
+	[TekErrorKind_gen_syn_type_struct_field_expected_to_end_with_a_new_line] = "a structure field must be terminated with a new line or ';'",
+	[TekErrorKind_gen_syn_type_struct_field_unexpected_token] = "expected an identifer here for a structure field. you can also use 'struct' or 'union' for anonymous fields",
+	[TekErrorKind_gen_syn_proc_expected_parentheses] = "'(' must follow the 'proc' keyword to define some parameters",
+	[TekErrorKind_gen_syn_proc_expected_parentheses_to_follow_arrow] = "'(' must follow the '->' to define some return parameters",
+	[TekErrorKind_gen_syn_proc_param_cannot_have_vararg_in_return_params] = "we cannot have a variable argument in the return parameters",
+	[TekErrorKind_gen_syn_proc_param_expected_identifer] = "expected an identifier for this procedure parameter",
+	[TekErrorKind_gen_syn_proc_param_colon_must_follow_ident] = "expected a ':' here so it follows the identifier for procedure parameter",
+	[TekErrorKind_gen_syn_proc_param_unexpected_delimiter] = "expected ',', new line or ';' here to declare another parameter or a ')' to finish declaring parameters",
+	[TekErrorKind_gen_syn_expr_unexpected_token] = "a expression is expected to be here",
+	[TekErrorKind_gen_syn_expr_incorrect_unary_op_placement] = "a unary operator cannot come before an expression. instead you have to use a '.' operator after the expression followed by unary operator you wish to use",
+	[TekErrorKind_gen_syn_type_unexpected_token] = "a type is expected to be here",
+	[TekErrorKind_gen_syn_type_bounded_int_expected_pipe_and_bit_count] = "we have a bounded integer 'U' or 'S', so we expect a '|' here followed by the number of bits to use for this bounded integer",
+	[TekErrorKind_gen_syn_expr_call_expected_close_parentheses] = "expected a ',', new line or ';' here to supply more arguments to the call expression or a ')' to finish",
+	[TekErrorKind_gen_syn_type_array_expected_close_bracket] = "expected a ']' here to finish the array type",
+	[TekErrorKind_gen_syn_expr_index_expected_close_bracket] = "expected a ']' here to finish the index expression",
+	[TekErrorKind_gen_syn_expr_expected_close_parentheses] = "expected a ')' here to finish the expression",
+	[TekErrorKind_gen_syn_expr_loop_expected_curly_brace] = "expected a '{' here to follow the loop keyword",
+	[TekErrorKind_gen_syn_expr_array_expected_close_bracket] = "expected a ',', new line or ';' here to supply more elements to the array expression or a ']' to finish",
+	[TekErrorKind_gen_syn_expr_if_expected_stmt_block] = "expected a '{' here to follow the condition of the if expression to define the success block",
+	[TekErrorKind_gen_syn_expr_if_else_unexpected_token] = "expected a '{' here to declare an else block or a 'if' to declare an else if",
+	[TekErrorKind_gen_syn_expr_match_must_define_cases] = "a match must define its cases, use the '{' a create a list of cases",
+	[TekErrorKind_gen_syn_expr_match_unexpected_token] = "expected 'case' for a condition, 'else' or '{' to define a block for 'case' and 'else'. you can also finish defining match cases with '}'",
+	[TekErrorKind_gen_syn_expr_match_case_expected_to_end_with_a_new_line] = "a match 'case', 'else' or statement block must be terminated with a new line or ';'",
+	[TekErrorKind_gen_syn_expr_for_expected_stmt_block] = "expected a '{' here to follow the iterator of the for expression to define the loop block",
+	[TekErrorKind_gen_syn_expr_for_expected_in_keyword] = "expected 'in' keyword here to follow the variable declartion of the for loop expression",
+	[TekErrorKind_gen_syn_stmt_only_allow_var_decl] = "inside statement blocks, we can only have 'var' declartions",
 };
 
 static char* TekErrorKind_double_info_lines[TekErrorKind_COUNT][2] = {
@@ -1324,6 +1335,11 @@ void TekCompiler_error_string_code(TekCompiler* c, TekStk(char)* string_out, Tek
 			} else {
 				*TekStk_push(string_out, NULL) = '^';
 			}
+
+			// limit newline character to a single arrow
+			if (byte == '\r' || byte == '\n')
+				break;
+
 			i += 1;
 			has_printed_arrow = tek_true;
 		}
@@ -1407,13 +1423,20 @@ void TekCompiler_errors_string(TekCompiler* c, TekStk(char)* string_out, TekBool
 			case TekErrorKind_lexer_invalid_string_ascii_esc_char_code_fmt:
 			case TekErrorKind_lexer_invalid_string_esc_sequence:
 			case TekErrorKind_gen_syn_mod_must_have_impl:
-			case TekErrorKind_gen_syn_decl_mod_colon_must_follow_ident:
+			case TekErrorKind_gen_syn_mod_decl_colon_must_follow_ident:
 			case TekErrorKind_gen_syn_decl_expected_keyword:
-			case TekErrorKind_gen_syn_entry_expected_to_end_with_a_new_line:
+			case TekErrorKind_gen_syn_mod_entry_expected_to_end_with_a_new_line:
+			case TekErrorKind_gen_syn_type_struct_field_colon_must_follow_ident:
+			case TekErrorKind_gen_syn_type_struct_field_expected_to_end_with_a_new_line:
+			case TekErrorKind_gen_syn_type_struct_field_unexpected_token:
 			case TekErrorKind_gen_syn_proc_expected_parentheses:
 			case TekErrorKind_gen_syn_proc_expected_parentheses_to_follow_arrow:
-			case TekErrorKind_gen_syn_proc_params_cannot_have_vararg_in_return_params:
-			case TekErrorKind_gen_syn_proc_params_unexpected_delimiter:
+			case TekErrorKind_gen_syn_proc_param_cannot_have_vararg_in_return_params:
+			case TekErrorKind_gen_syn_proc_param_expected_identifer:
+			case TekErrorKind_gen_syn_proc_param_colon_must_follow_ident:
+			case TekErrorKind_gen_syn_proc_param_unexpected_delimiter:
+			case TekErrorKind_gen_syn_expr_unexpected_token:
+			case TekErrorKind_gen_syn_expr_incorrect_unary_op_placement:
 			case TekErrorKind_gen_syn_type_unexpected_token:
 			case TekErrorKind_gen_syn_type_bounded_int_expected_pipe_and_bit_count:
 			case TekErrorKind_gen_syn_expr_call_expected_close_parentheses:
@@ -1422,9 +1445,12 @@ void TekCompiler_errors_string(TekCompiler* c, TekStk(char)* string_out, TekBool
 			case TekErrorKind_gen_syn_expr_expected_close_parentheses:
 			case TekErrorKind_gen_syn_expr_loop_expected_curly_brace:
 			case TekErrorKind_gen_syn_expr_array_expected_close_bracket:
+			case TekErrorKind_gen_syn_expr_if_expected_stmt_block:
 			case TekErrorKind_gen_syn_expr_if_else_unexpected_token:
 			case TekErrorKind_gen_syn_expr_match_must_define_cases:
 			case TekErrorKind_gen_syn_expr_match_unexpected_token:
+			case TekErrorKind_gen_syn_expr_match_case_expected_to_end_with_a_new_line:
+			case TekErrorKind_gen_syn_expr_for_expected_stmt_block:
 			case TekErrorKind_gen_syn_expr_for_expected_in_keyword:
 			case TekErrorKind_gen_syn_stmt_only_allow_var_decl:
 				TekCompiler_error_string_single(c, string_out, use_ascii_colors, e);
